@@ -8,10 +8,18 @@ version = "0.1.0"
 description = "Explains WHY two datasets differ, in plain English, with eval-backed accuracy claims."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "Apache-2.0" }
+classifiers = [
+    "License :: OSI Approved :: Apache Software License",
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Quality Assurance",
+]
 
 dependencies = [
     "pandas>=2.0",
+    "numpy>=1.24",
     "datacompy>=0.11",
     "pydantic>=2.0",
     "pyyaml>=6.0",

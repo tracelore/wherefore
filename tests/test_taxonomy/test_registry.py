@@ -40,25 +40,22 @@ def test_patterns_by_dtype_filters_correctly():
     assert unrelated == []
 
 
-def test_resolve_import_path_for_timezone_corruptor_target():
-    # We're not calling the function (it's not implemented yet), just
-    # confirming the import path syntax resolves to a real module --
-    # this will start failing once corruptors/timezone_shift.py is
-    # filled in, which is the point: it should resolve successfully
-    # once the module exists, and the module currently exists as a
-    # stub, so importing it should succeed even though `apply` doesn't
-    # exist yet.
-    module_path, func_name = (
-        registry.get_pattern("timezone_shift").synthetic_corruption.generator.split(":")
-    )
-    import importlib
+def test_resolve_import_path_for_timezone_corruptor():
+    """
+    Now that synthetic/corruptors/timezone_shift.py implements apply(),
+    this test exercises the real resolution path end-to-end rather than
+    just checking import-path syntax (see git history for the prior
+    placeholder version of this test).
+    """
+    generator_path = registry.get_pattern("timezone_shift").synthetic_corruption.generator
+    apply_fn = registry.resolve_import_path(generator_path)
 
-    module = importlib.import_module(module_path)
-    assert not hasattr(module, func_name), (
-        "This test should start failing (in a good way) once "
-        "synthetic/corruptors/timezone_shift.py implements apply() -- "
-        "update this test to actually call resolve_import_path() then."
-    )
+    import pandas as pd
+
+    df = pd.DataFrame({"ts": pd.to_datetime(["2024-01-01", "2024-01-02", "2024-01-03"])})
+    corrupted, affected = apply_fn(df, column="ts", offset_hours=5.0, affected_fraction=1.0, seed=1)
+    assert len(affected) == 3
+    assert (corrupted["ts"] - df["ts"] == pd.Timedelta(hours=5)).all()
 
 
 def test_malformed_pattern_file_raises_taxonomy_load_error(tmp_path, monkeypatch):

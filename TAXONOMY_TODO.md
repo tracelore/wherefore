@@ -1,8 +1,14 @@
 # Taxonomy build tracker
 
-`timezone_shift` is the only fully-implemented pattern so far (schema +
-YAML proven against the registry; corruptor function still stubbed --
-see synthetic/corruptors/timezone_shift.py).
+`timezone_shift` is fully implemented end-to-end: schema + YAML +
+corruptor (`synthetic/corruptors/timezone_shift.py`), proven against
+the registry AND against real generated fixtures in both domains
+(`FINANCIAL_ACCOUNTS`, `HEALTHCARE_PATIENTS`). 27 tests passing across
+taxonomy, base_dataset, and the corruptor. The detection_hints
+description in the YAML was verified to match actual corruptor output
+(constant_offset_subset: every affected row shifts by exactly the same
+delta, all other rows untouched) -- see
+tests/test_synthetic/test_corruptors/test_timezone_shift.py.
 
 ## Why patterns are built one at a time, not all-YAML-first
 
@@ -21,6 +27,8 @@ to match what was actually observed -> write llm_context -> validate
 against the registry (same loop just proven for timezone_shift).
 
 ## Remaining patterns (build in this order, easiest signature first)
+
+`truncation` is next:
 
 - [ ] `truncation` -- string/numeric values cut off at a fixed length.
       Signature candidate: target values are consistently a prefix of
