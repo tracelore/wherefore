@@ -145,6 +145,66 @@ def _try_parse_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def load_parquet(path: str | Path) -> pd.DataFrame:
+    """
+    Loads a Parquet file. Unlike CSV, Parquet is a columnar format
+    with NATIVE typing -- confirmed by direct testing that a real
+    datetime column round-trips through Parquet as a real datetime
+    dtype with no parsing step needed, sidestepping the entire class
+    of CSV round-trip bugs this project hit twice (nanosecond-noise
+    timestamps, the "NULL"-sentinel-blocks-the-whole-column datetime
+    parsing failure). No special null handling is needed either --
+    Parquet has a native null representation distinct from any string
+    value, so there's no "literal NULL vs. empty cell" ambiguity to
+    resolve the way there is for CSV.
+
+    KNOWN LIMITATION, confirmed by direct testing: Parquet's columnar
+    typing means a column CANNOT hold a mix of types (e.g. a real
+    Timestamp next to the literal string "NULL") the way an in-memory
+    pandas object-dtype column can -- writing such a column to Parquet
+    raises pyarrow.lib.ArrowTypeError. This means null_type_coercion
+    corruption is only representable in a Parquet file if the WHOLE
+    column was already string-typed before the sentinel was
+    introduced (e.g. a pipeline that stores timestamps as text) -- not
+    on a column that's natively a Parquet timestamp/numeric type. This
+    is an honest, real-world-accurate limitation: it reflects that
+    Parquet's strong typing makes this specific failure mode
+    genuinely less likely to occur in real Parquet-based pipelines in
+    the first place, not a bug in this loader.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No such file: {path}")
+
+    return pd.read_parquet(path)
+
+
+def load_excel(path: str | Path, sheet_name: str | int = 0) -> pd.DataFrame:
+    """
+    Loads an Excel file (.xlsx). Confirmed by direct testing that
+    pandas' default read_excel has the SAME null-collapsing behavior
+    as read_csv -- a literal "NULL" string and a genuinely empty cell
+    both collapse to NaN by default -- so the same fix applies:
+    disable default null-string collapsing and treat only a truly
+    empty cell as null.
+
+    `sheet_name` defaults to the first sheet (index 0), matching
+    pandas' own default -- exposed as a parameter since a real
+    workbook may have multiple sheets and the caller may need a
+    specific one, not silently always the first.
+    """
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No such file: {path}")
+
+    return pd.read_excel(
+        path,
+        sheet_name=sheet_name,
+        keep_default_na=False,
+        na_values=[""],
+    )
+
+
 def load_json(path: str | Path) -> pd.DataFrame:
     """
     Loads a JSON file (array of flat objects) into a DataFrame.
@@ -164,9 +224,9 @@ def load_json(path: str | Path) -> pd.DataFrame:
 
 def load_file(path: str | Path, encoding: str = "utf-8") -> pd.DataFrame:
     """
-    Dispatches to load_csv or load_json based on file extension.
-    Raises ValueError for unrecognized extensions rather than guessing
-    a format -- guessing wrong silently would produce a confusingly
+    Dispatches to the right loader based on file extension. Raises
+    ValueError for unrecognized extensions rather than guessing a
+    format -- guessing wrong silently would produce a confusingly
     malformed DataFrame rather than a clear error.
     """
     path = Path(path)
@@ -176,8 +236,12 @@ def load_file(path: str | Path, encoding: str = "utf-8") -> pd.DataFrame:
         return load_csv(path, encoding=encoding)
     elif suffix == ".json":
         return load_json(path)
+    elif suffix == ".parquet":
+        return load_parquet(path)
+    elif suffix in (".xlsx", ".xls"):
+        return load_excel(path)
     else:
         raise ValueError(
             f"Unrecognized file extension {suffix!r} for {path}. "
-            "wherefore currently supports .csv and .json."
+            "wherefore currently supports .csv, .json, .parquet, and .xlsx/.xls."
         )

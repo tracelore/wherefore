@@ -30,6 +30,14 @@ What's real today:
 - **A working CLI**: `wherefore compare a.csv b.csv` runs against real
   files on disk and produces a report — see [Try it yourself](#try-it-yourself-with-your-own-files)
   below
+- **CSV, JSON, Parquet, and Excel (.xlsx/.xls)** all supported as
+  input formats, auto-detected by file extension. Parquet specifically
+  sidesteps a whole class of CSV round-trip issues this project hit
+  twice (datetime precision, null-sentinel-blocks-parsing) since it's
+  natively typed — see [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for
+  the real bugs this surfaced and a documented, honest limitation
+  (Parquet's strong typing means a column can't always represent a
+  mixed-type null-coercion bug the way CSV/Excel can)
 - Comparison engine wrapping `datacompy`: schema-aware diffing,
   composite join keys, dtype-mismatch detection distinct from
   value-mismatch detection
@@ -221,7 +229,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **189 passed**). It's
+dependencies, and runs the test suite (should show **199 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 **No API key needed for this.** The test suite covers the AI reasoning

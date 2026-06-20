@@ -443,3 +443,77 @@ the real API, not that either layer is bulletproof at scale. Worth not
 over-reading "100% twice" as more confidence than it actually warrants.
 Expanding fixture coverage remains the natural next step before
 leaning harder on these numbers in any public claim.
+
+## Multi-source format support: Parquet and Excel
+
+`loaders.py` now supports `.parquet` and `.xlsx`/`.xls`, alongside the
+existing `.csv`/`.json`. Both verified end-to-end through the real
+comparison pipeline (load -> diff -> cluster) and the real CLI, not
+just unit-tested in isolation -- a real `timezone_shift` fixture
+through Parquet, a real `truncation` fixture through Excel, a real
+`enum_drift` fixture through Excel (initially scored just below
+threshold on a too-small sample -- correctly conservative, not a bug;
+confirmed correct at confidence 1.0 on a larger sample).
+
+Two real, confirmed properties worth knowing:
+
+**Parquet sidesteps the CSV round-trip bug class entirely.** Confirmed
+by direct testing: a real datetime column round-trips through Parquet
+with NO parsing step needed (native columnar typing), unlike CSV,
+which required the hybrid datetime-detection logic in
+`_try_parse_datetime_columns` to avoid the exact bugs this project hit
+twice (nanosecond-precision noise, "NULL"-blocks-the-whole-column).
+
+**Parquet has a genuine, real-world-accurate limitation:** a column
+cannot hold a mix of types (e.g. a real Timestamp next to the literal
+string "NULL") the way an in-memory pandas object-dtype column can --
+writing such a column raises `pyarrow.lib.ArrowTypeError`, confirmed
+directly. This means `null_type_coercion` corruption is only
+representable in a Parquet file on a column that was ALREADY
+string-typed before the sentinel was introduced, not on a natively
+Parquet-typed (datetime/numeric) column. This is documented as an
+honest limitation in `load_parquet`'s docstring, not worked around --
+it accurately reflects that Parquet's strong typing makes this
+specific failure mode genuinely less likely in real Parquet pipelines.
+
+Excel needed the same null-preservation fix as CSV (confirmed directly
+that `pd.read_excel`'s defaults collapse a literal "NULL" string and a
+genuinely empty cell to the same NaN value) -- same
+`keep_default_na=False, na_values=['']` fix, confirmed to transfer
+cleanly.
+
+`pyarrow` (previously only a transitive pandas dependency) and
+`openpyxl` are now declared explicitly in `pyproject.toml`, following
+the same "declare what you import directly" discipline established
+after the earlier `numpy` omission.
+
+199 tests passing.
+
+## Multi-source roadmap: what's next
+
+Per a deliberate scoping discussion: file-format expansion (this
+round) is intentionally separated from database connectivity (next
+round), since the latter introduces genuinely new architectural
+concerns this project hasn't needed yet -- credential handling,
+connection-string security, and a join-key story that needs to handle
+real schema introspection, not just CSV-style uniqueness heuristics.
+
+Agreed design for the database round, not yet built:
+- A `SourceSpec` abstraction normalizing "where data comes from" into
+  either a file path or a database connection + table, so loaders.py
+  dispatches on it the same way it already dispatches on file
+  extension -- this keeps comparison/clustering/taxonomy/explain()
+  unaware of where data came from, same separation that made file-
+  format expansion clean to add this round.
+- CLI syntax: `db://table_name` as a lightweight source descriptor,
+  paired with `--source-conn-env`/`--target-conn-env` flags pointing
+  at ENVIRONMENT VARIABLE NAMES (not values) holding the real
+  connection string -- so credentials never appear in argv or shell
+  history.
+- Primary key handling: auto-detect the real primary key from the
+  database's own schema metadata when possible, but ALWAYS show the
+  user what was detected and require confirmation before running the
+  comparison -- a wrong auto-detected key against a real production
+  database is a more serious mistake than a wrong key on a CSV.
+- Planned to start with SQLite (no server setup needed, fully testable
+  in this environment) before Postgres/MySQL, once the pattern's proven.

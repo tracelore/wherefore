@@ -32,6 +32,10 @@ dependencies = [
                           # tool_choice={"type": "tool", "name": ...} shape; the
                           # 0.30 floor previously here was untested against this code.
     "rapidfuzz>=3.0",   # fuzzy key matching for comparison engine
+    "pyarrow>=14.0",     # Parquet read/write for loaders.py:load_parquet -- was previously
+                         # only a transitive dependency via pandas; declared explicitly
+                         # since loaders.py imports pandas' parquet path directly.
+    "openpyxl>=3.1",     # Excel (.xlsx) read for loaders.py:load_excel
 ]
 
 [project.optional-dependencies]

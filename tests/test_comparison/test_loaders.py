@@ -8,7 +8,7 @@ preservation are deliberate, not bugs to fix.
 import pandas as pd
 import pytest
 
-from wherefore.comparison.loaders import load_csv, load_file, load_json
+from wherefore.comparison.loaders import load_csv, load_excel, load_file, load_json, load_parquet
 
 
 @pytest.fixture
@@ -181,3 +181,109 @@ def test_mostly_garbage_column_is_not_converted(tmp_path):
     # Failure rate here is 3/4 = 75%, well above the 20% threshold --
     # column should be left as plain strings.
     assert df["val"].dtype.name in ("object", "str")
+
+
+def test_load_parquet_preserves_native_datetime_dtype(tmp_path):
+    """
+    Confirmed by direct testing: Parquet round-trips a real datetime
+    column with NO parsing step needed -- unlike CSV, which requires
+    the hybrid datetime-detection logic above. The resolution may
+    differ from the in-memory original (Parquet defaults to
+    milliseconds; pandas in-memory uses seconds here), but the VALUES
+    match exactly, and dtype-family matching elsewhere in the project
+    is already designed to handle resolution variance.
+    """
+    df = pd.DataFrame({"id": [1, 2], "ts": pd.to_datetime(["2024-01-01", "2024-01-02"])})
+    p = tmp_path / "test.parquet"
+    df.to_parquet(p, index=False)
+
+    loaded = load_parquet(p)
+    assert pd.api.types.is_datetime64_any_dtype(loaded["ts"])
+    assert (loaded["ts"].values == df["ts"].values).all()
+
+
+def test_load_parquet_raises_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_parquet(tmp_path / "missing.parquet")
+
+
+def test_load_parquet_cannot_represent_mixed_type_column(tmp_path):
+    """
+    Documents a real, confirmed limitation: Parquet's columnar typing
+    means a column genuinely cannot hold a mix of types (e.g. a real
+    Timestamp next to the literal string "NULL") the way an in-memory
+    pandas object-dtype column can. This is not a loaders.py bug --
+    it's a property of the file format itself, confirmed by attempting
+    the write (not the read) and observing pyarrow's own error.
+    """
+    df = pd.DataFrame({"id": [1, 2], "val": [pd.Timestamp("2024-01-01"), "NULL"]})
+    p = tmp_path / "mixed.parquet"
+    with pytest.raises(Exception):  # pyarrow.lib.ArrowTypeError specifically
+        df.to_parquet(p, index=False)
+
+
+def test_load_excel_only_truly_empty_cell_becomes_null(tmp_path):
+    """
+    Regression-style test mirroring the CSV null-preservation test:
+    confirmed by direct testing that pandas' default read_excel has
+    the SAME null-collapsing behavior as read_csv (a literal "NULL"
+    string and a genuinely empty cell both become NaN by default).
+    """
+    df = pd.DataFrame({"id": [1, 2, 3, 4], "note": ["hello", None, "NULL", ""]})
+    p = tmp_path / "test.xlsx"
+    df.to_excel(p, index=False)
+
+    loaded = load_excel(p)
+    assert loaded.loc[0, "note"] == "hello"
+    assert pd.isna(loaded.loc[1, "note"])  # genuinely None in the source
+    assert loaded.loc[2, "note"] == "NULL"  # literal string, preserved
+    assert pd.isna(loaded.loc[3, "note"])  # genuinely empty string
+
+
+def test_load_excel_preserves_native_datetime_dtype(tmp_path):
+    df = pd.DataFrame({"id": [1, 2], "ts": pd.to_datetime(["2024-01-01", "2024-01-02"])})
+    p = tmp_path / "test.xlsx"
+    df.to_excel(p, index=False)
+
+    loaded = load_excel(p)
+    assert pd.api.types.is_datetime64_any_dtype(loaded["ts"])
+
+
+def test_load_excel_raises_file_not_found(tmp_path):
+    with pytest.raises(FileNotFoundError):
+        load_excel(tmp_path / "missing.xlsx")
+
+
+def test_load_excel_respects_sheet_name(tmp_path):
+    p = tmp_path / "multi_sheet.xlsx"
+    with pd.ExcelWriter(p) as writer:
+        pd.DataFrame({"id": [1]}).to_excel(writer, sheet_name="First", index=False)
+        pd.DataFrame({"id": [2]}).to_excel(writer, sheet_name="Second", index=False)
+
+    first = load_excel(p, sheet_name="First")
+    second = load_excel(p, sheet_name="Second")
+    assert first.loc[0, "id"] == 1
+    assert second.loc[0, "id"] == 2
+
+
+def test_load_file_dispatches_parquet(tmp_path):
+    df = pd.DataFrame({"id": [1, 2]})
+    p = tmp_path / "test.parquet"
+    df.to_parquet(p, index=False)
+    loaded = load_file(p)
+    assert len(loaded) == 2
+
+
+def test_load_file_dispatches_xlsx(tmp_path):
+    df = pd.DataFrame({"id": [1, 2]})
+    p = tmp_path / "test.xlsx"
+    df.to_excel(p, index=False)
+    loaded = load_file(p)
+    assert len(loaded) == 2
+
+
+def test_load_file_error_message_mentions_all_supported_formats(tmp_path):
+    p = tmp_path / "test.txt"
+    p.write_text("not a real format")
+    with pytest.raises(ValueError, match=r"\.csv.*\.json.*\.parquet.*\.xlsx"):
+        load_file(p)
