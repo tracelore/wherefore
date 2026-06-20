@@ -24,7 +24,7 @@ against labeled synthetic ground truth — see [Evals](#evals--why-trust-the-exp
 
 ## Status
 
-🚧 **Actively built in public. The CLI works end-to-end through statistical pattern detection — the AI narrative layer is the next piece.**
+🚧 **Actively built in public. The full pipeline works end-to-end — statistical detection, AI explanation, and a scored eval harness all real and verified.**
 
 What's real today:
 - **A working CLI**: `wherefore compare a.csv b.csv` runs against real
@@ -75,16 +75,17 @@ What's real today:
   case (long numeric IDs can look like credit card numbers) found
   during testing.
 - The AI reasoning layer is built and **verified against the real
-  Claude API**: a `ClusterExplanation` schema, a swappable `Provider`
-  interface, and a real Claude integration that uses *forced* tool-use
-  so the model can't return free-text prose — it must call a tool
-  whose schema is generated directly from the pydantic model, so the
-  two can't silently drift apart. Tested against real fixtures from
-  three patterns plus a genuinely unrecognized case — across all
-  four, the model gave sound causal reasoning, correctly ruled out
-  competing explanations using the actual data, and correctly refused
-  to force-fit a pattern when none applied. See
-  [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the full results.
+  Claude API, twice**: once by hand against four cases, and once via
+  the scored eval harness across all five patterns plus the
+  unrecognized case — 100% accuracy both times (small sample, see
+  [Evals](#evals--why-trust-the-explanations) for the honest caveat).
+  Uses *forced* tool-use so the model can't return free-text prose —
+  it must call a tool whose schema is generated directly from the
+  pydantic model, so the two can't silently drift apart. In testing,
+  it gave sound causal reasoning, correctly ruled out competing
+  explanations using the actual data, and correctly disambiguated a
+  cluster where clustering itself reported two legitimate candidates —
+  see [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the full account.
 - **Wired into the CLI** behind an explicit `--explain` flag — off by
   default, so the tool stays free and key-free for anyone just trying
   it out. With `--explain` (and `ANTHROPIC_API_KEY` set), the report
@@ -92,10 +93,12 @@ What's real today:
   reasoned from, not instead of it — so you can verify the claim
   against the raw data yourself.
 
-What's not built yet: the eval harness scoring loop that runs this at
-scale against many labeled fixtures and computes precision/recall per
-corruption type. See [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the
-live build queue.
+What's next, not yet done: expanding fixture coverage so the eval
+numbers carry more statistical weight (six fixtures proves the
+mechanism works, not that it's bulletproof at scale), a sixth taxonomy
+pattern (`encoding_mismatch`), and database/cloud-storage connectivity
+(currently file-based only: CSV, JSON, Parquet, Excel). See
+[`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the live build queue.
 
 ## The problem, in plain terms
 
@@ -117,7 +120,7 @@ in this project, not an afterthought.
 ## Architecture
 
 ```
-source.csv, target.csv
+source file, target file        (CSV, JSON, Parquet, or Excel)
         │
         ▼
  loaders + key matching   (exact by default; --fuzzy-keys for reformatted keys)
@@ -132,23 +135,29 @@ source.csv, target.csv
  deterministic clustering  (groups mismatches; runs cheap statistical
         │                   signature checks — NO causal claims here)
         ▼
- ── wherefore compare stops here today, reporting statistical matches ──
+ candidate pattern(s), confidence-scored
         │
-        ▼  (not built yet)
+        ├─── default: stop here, report statistics only (free, no API key)
+        │
+        ▼  with --explain
  AI reasoning layer        (Claude, behind a swappable explain() interface;
+        │                   redacts common sensitive patterns by default,
         │                   takes statistically-flagged clusters, writes
         │                   the causal narrative, cites real example rows,
         │                   honestly flags "unrecognized" when nothing fits)
         ▼
- Markdown report
+ Markdown report           (statistics always; AI narrative alongside
+                             the evidence when --explain is used)
 ```
 
-**Failure patterns are data, not code.** Each known failure mode
-(timezone shift, truncation, encoding mismatch, null/type coercion,
-dedup failure, key mismatch, float precision loss, enum drift) is a YAML
-file under `src/wherefore/taxonomy/patterns/`, validated against a strict
-schema. Adding a new pattern means writing a YAML file and a small
-corruptor function — never touching clustering or reasoning code. See
+**Failure patterns are data, not code.** Each known failure mode is a
+YAML file under `src/wherefore/taxonomy/patterns/`, validated against
+a strict schema. Five are built and tested today — `timezone_shift`,
+`truncation`, `enum_drift`, `null_type_coercion`, `float_precision` —
+with more planned (`encoding_mismatch`, `key_mismatch`,
+`dedup_failure`; see [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md)). Adding
+a new pattern means writing a YAML file and a small corruptor function
+— never touching clustering or reasoning code. See
 [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the full contract and the
 design tradeoffs behind it.
 
@@ -282,7 +291,10 @@ this.
 wherefore compare old_export.csv new_export.csv --output report.md
 ```
 
-That's the whole interface. Two files in, a Markdown report out. No
+That's the whole interface. Two files in, a Markdown report out. Works
+the same way with `.json`, `.parquet`, or `.xlsx`/`.xls` — mix and
+match formats freely (e.g. compare a `.csv` export against a
+`.parquet` file) since the format is auto-detected per file. No
 key column required — `wherefore` looks at your columns and picks the
 one that looks like an identifier (mostly-unique values, often named
 something with "id" or "key" in it). If it picks wrong, or your files
@@ -343,6 +355,15 @@ The report includes the AI's narrative *alongside* the statistical
 evidence it was reasoned from — not instead of it — so you can check
 the claim against the actual data yourself rather than trusting it
 blindly.
+
+**Before any value reaches that API call, it's checked against a
+redaction pattern** for emails, SSNs, credit card numbers, and phone
+numbers — on by default, no flag needed. If anything gets masked,
+you'll see it called out (`Redacted before sending to Claude: email`).
+This is pattern-based, not a general PII scanner — see
+[`SECURITY.md`](./SECURITY.md) for exactly what it does and doesn't
+catch. Use `--no-redact` if you've already vetted your data and want
+raw values in the prompt.
 
 If nothing in the taxonomy matches what's actually wrong in your data,
 `wherefore` says so — `pattern unrecognized` — rather than forcing a
