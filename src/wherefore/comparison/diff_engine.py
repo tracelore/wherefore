@@ -131,24 +131,63 @@ def _extract_mismatches(dc: "datacompy.PandasCompare", join_columns: list[str]) 
     compared_columns = [
         col for col in dc.column_stats if col["column"] not in join_columns
     ]
+    # dtype_mismatch_columns: columns where source_dtype != target_dtype.
+    # Confirmed by direct testing that datacompy's per-row {col}_match
+    # boolean is UNRELIABLE for EVERY row in these columns once the
+    # overall column dtypes differ -- even rows whose individual cells
+    # are still the exact same Python type and value on both sides
+    # (e.g. a Timestamp next to the identical Timestamp) get reported
+    # as mismatched, purely because OTHER cells in the column forced a
+    # dtype change (e.g. one null coerced to a string sentinel forces
+    # the whole column to object dtype).
+    #
+    # Fix: for these columns, compare each cell's (type, value) pair
+    # directly rather than trusting datacompy's _match flag OR
+    # comparing stringified values. String comparison was tried first
+    # and rejected -- confirmed by direct testing it produces the WRONG
+    # answer for a genuinely different-typed but identically-printed
+    # case (float 10.5 vs str '10.5' must count as a real mismatch,
+    # since a column actually changing type during migration is a real
+    # finding, even when the printed values happen to look the same).
+    # Comparing (type(value), value) tuples gets both cases right:
+    # same type + same value -> not a mismatch (datacompy's bug,
+    # suppressed); same printed value but different type -> still
+    # correctly flagged as a mismatch.
+    dtype_mismatch_columns = {
+        stat["column"] for stat in compared_columns if stat["dtype1"] != stat["dtype2"]
+    }
+
+    def _cell_is_mismatch(source_value, target_value) -> bool:
+        if type(source_value) is not type(target_value):
+            return True
+        try:
+            return not (source_value == target_value)
+        except TypeError:
+            return True  # genuinely incomparable -- treat as a real mismatch, not a false negative
 
     mismatches: list[MismatchRow] = []
     for stat in compared_columns:
         col = stat["column"]
-        match_col = f"{col}_match"
-        if match_col not in intersect.columns:
+        source_col, target_col = f"{col}_source", f"{col}_target"
+        if source_col not in intersect.columns or target_col not in intersect.columns:
             continue  # defensive: shouldn't happen given column_stats, but don't crash the whole diff over one odd column
 
-        mismatched_rows = intersect[~intersect[match_col].astype(bool)]
-        for _, row in mismatched_rows.iterrows():
+        if col in dtype_mismatch_columns:
+            candidate_rows = intersect
+            row_is_mismatch = lambda row: _cell_is_mismatch(row[source_col], row[target_col])
+        else:
+            match_col = f"{col}_match"
+            if match_col not in intersect.columns:
+                continue
+            candidate_rows = intersect[~intersect[match_col].astype(bool)]
+            row_is_mismatch = lambda row: True  # already filtered by datacompy's flag
+
+        for _, row in candidate_rows.iterrows():
+            if not row_is_mismatch(row):
+                continue
             key = {jc: row[jc] for jc in join_columns}
             mismatches.append(
-                MismatchRow(
-                    key=key,
-                    column=col,
-                    source_value=row[f"{col}_source"],
-                    target_value=row[f"{col}_target"],
-                )
+                MismatchRow(key=key, column=col, source_value=row[source_col], target_value=row[target_col])
             )
 
     return mismatches

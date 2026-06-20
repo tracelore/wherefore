@@ -14,6 +14,7 @@ from evals.harness.scoring import (
     ScoredCase,
     compute_metrics_by_pattern,
     score_pattern_match,
+    score_pattern_match_against_candidates,
     summarize_run,
 )
 
@@ -95,3 +96,34 @@ def test_empty_run_does_not_crash():
 def test_precision_and_recall_are_none_with_zero_denominator():
     metrics = compute_metrics_by_pattern([])
     assert metrics == {}
+
+
+def test_against_candidates_true_positive_when_pattern_present_but_not_first():
+    """
+    The exact real bug this function fixes: a fixture's true pattern
+    (null_type_coercion) co-occurred with another legitimate candidate
+    (enum_drift) that happened to appear first in the list due to
+    registry insertion order. Scoring only candidates[0] would
+    incorrectly call this a miss.
+    """
+    result = score_pattern_match_against_candidates(
+        "null_type_coercion", ["enum_drift", "null_type_coercion"]
+    )
+    assert result == Outcome.TRUE_POSITIVE
+
+
+def test_against_candidates_false_negative_when_pattern_genuinely_absent():
+    result = score_pattern_match_against_candidates("timezone_shift", ["enum_drift"])
+    assert result == Outcome.FALSE_NEGATIVE
+
+
+def test_against_candidates_honest_abstain():
+    assert score_pattern_match_against_candidates(None, []) == Outcome.HONEST_ABSTAIN
+
+
+def test_against_candidates_false_positive():
+    assert score_pattern_match_against_candidates(None, ["enum_drift"]) == Outcome.FALSE_POSITIVE
+
+
+def test_against_candidates_false_abstain():
+    assert score_pattern_match_against_candidates("timezone_shift", []) == Outcome.FALSE_ABSTAIN

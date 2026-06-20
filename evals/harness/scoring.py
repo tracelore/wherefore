@@ -44,6 +44,11 @@ def score_pattern_match(actual_pattern_id: str | None, predicted_pattern_id: str
     plumbing -- given what was ACTUALLY injected (None if nothing was)
     and what the system PREDICTED (None if it said unrecognized),
     returns the outcome type.
+
+    Use this for scoring explain()'s output specifically -- it commits
+    to exactly ONE matched_pattern_id (forced by the tool-use schema in
+    providers/claude.py), so exact equality is the right test of
+    whether the final, human-facing answer is correct.
     """
     if actual_pattern_id is None and predicted_pattern_id is None:
         return Outcome.HONEST_ABSTAIN
@@ -52,6 +57,44 @@ def score_pattern_match(actual_pattern_id: str | None, predicted_pattern_id: str
     if actual_pattern_id is not None and predicted_pattern_id is None:
         return Outcome.FALSE_ABSTAIN
     if actual_pattern_id == predicted_pattern_id:
+        return Outcome.TRUE_POSITIVE
+    return Outcome.FALSE_NEGATIVE
+
+
+def score_pattern_match_against_candidates(
+    actual_pattern_id: str | None, predicted_pattern_ids: list[str]
+) -> Outcome:
+    """
+    Like score_pattern_match, but for clustering's statistical output
+    specifically, which can legitimately report MULTIPLE candidate
+    patterns for one cluster (see cluster_mismatches.py's "On multiple
+    legitimate matches" docstring -- a genuine null coerced to a
+    sentinel string also satisfies consistent_value_mapping, and
+    clustering deliberately does not suppress either candidate).
+
+    Scoring only the first item in that list would test an accident of
+    registry insertion order, not anything clustering actually
+    promises -- confirmed directly: a real fixture's true pattern
+    (null_type_coercion) was scored as a false_negative purely because
+    a co-occurring candidate (enum_drift) happened to appear first in
+    the list, despite the true pattern being correctly present.
+
+    The honest question for clustering's job is set membership: did
+    the statistical layer surface the true cause AS A CANDIDATE, even
+    if alongside another legitimate one? That's what this function
+    tests. It does NOT apply to explain()'s output -- that commits to
+    exactly one matched_pattern_id by design (forced tool-use), so
+    score_pattern_match's exact-equality test is the right one there.
+    """
+    predicted_set = set(predicted_pattern_ids)
+
+    if actual_pattern_id is None and not predicted_set:
+        return Outcome.HONEST_ABSTAIN
+    if actual_pattern_id is None and predicted_set:
+        return Outcome.FALSE_POSITIVE
+    if actual_pattern_id is not None and not predicted_set:
+        return Outcome.FALSE_ABSTAIN
+    if actual_pattern_id in predicted_set:
         return Outcome.TRUE_POSITIVE
     return Outcome.FALSE_NEGATIVE
 

@@ -129,3 +129,55 @@ def test_partially_unparseable_column_is_left_as_string(tmp_path):
 
     df = load_csv(p)
     assert df["maybe_date"].dtype.name in ("object", "str")
+
+
+def test_mostly_dates_with_a_null_sentinel_parses_as_hybrid_column():
+    """
+    Regression test for a real bug caught while building
+    null_type_coercion: the ORIGINAL all-or-nothing version of this
+    function required every value to parse, so a single "NULL" sentinel
+    among 49 real dates blocked the WHOLE column from being recognized
+    as datetime -- this silently broke null_type_coercion detection on
+    any real CSV file, since the corruption this pattern exists to
+    detect is EXACTLY "mostly real dates, a few literal NULL strings."
+
+    The fix parses what's parseable as real datetimes and preserves
+    the original sentinel text exactly where parsing fails, gated by a
+    failure-rate threshold.
+    """
+    rows = [f"{i},2024-01-{(i % 28) + 1:02d} 10:00:00" for i in range(1, 49)]
+    rows += ["49,NULL", "50,NULL"]
+    csv_text = "id,ts\n" + "\n".join(rows) + "\n"
+
+    import io
+    import pandas as pd
+
+    df = pd.read_csv(io.StringIO(csv_text), keep_default_na=False, na_values=[""])
+    from wherefore.comparison.loaders import _try_parse_datetime_columns
+
+    result = _try_parse_datetime_columns(df)
+
+    # Real dates should be genuine Timestamps.
+    assert isinstance(result.loc[0, "ts"], pd.Timestamp)
+    # The sentinel strings must be preserved EXACTLY, not coerced to NaT.
+    assert result.loc[48, "ts"] == "NULL"
+    assert result.loc[49, "ts"] == "NULL"
+    assert result["ts"].dtype == object
+
+
+def test_mostly_garbage_column_is_not_converted(tmp_path):
+    """
+    The failure-rate threshold's other side: a column that's mostly
+    NOT dates (e.g. a genuinely mixed free-text field where a couple
+    of values happen to look like dates) should be left alone, not
+    wrongly treated as "a date column with some sentinel values."
+    """
+    rows = ["1,random text here", "2,more random text", "3,2024-01-15 10:00:00", "4,yet more text"]
+    csv_text = "id,val\n" + "\n".join(rows) + "\n"
+    p = tmp_path / "test.csv"
+    p.write_text(csv_text)
+
+    df = load_csv(p)
+    # Failure rate here is 3/4 = 75%, well above the 20% threshold --
+    # column should be left as plain strings.
+    assert df["val"].dtype.name in ("object", "str")

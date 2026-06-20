@@ -20,6 +20,7 @@ from wherefore.clustering.cluster_mismatches import (
 from wherefore.comparison.diff_engine import compare
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, HEALTHCARE_PATIENTS, generate_dataset
 from wherefore.synthetic.corruptors.enum_drift import apply as drift
+from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
 from wherefore.synthetic.corruptors.timezone_shift import apply
 from wherefore.synthetic.corruptors.truncation import apply as truncate
 
@@ -189,3 +190,33 @@ def test_three_independent_corruptions_each_match_exactly_one_pattern():
     assert [p.pattern_id for p in clusters_by_column["patient_name"].candidate_patterns] == ["truncation"]
     assert [p.pattern_id for p in clusters_by_column["encounter_date"].candidate_patterns] == ["timezone_shift"]
     assert [p.pattern_id for p in clusters_by_column["claim_status"].candidate_patterns] == ["enum_drift"]
+
+
+def test_null_coerced_to_sentinel_legitimately_matches_two_patterns_by_design():
+    """
+    Documents and locks in an intentional design decision (see
+    cluster_mismatches.py's "On multiple legitimate matches" docstring
+    section): a genuine null coerced to a literal sentinel string (the
+    null_type_coercion pattern) ALSO satisfies consistent_value_mapping
+    (the same source value -- NaT -- consistently maps to the same
+    target value -- "NULL"). Clustering does NOT suppress either
+    candidate or prioritize one as "more specific" -- that would be a
+    causal judgment call clustering is designed not to make. Both
+    candidates are reported; disambiguation is the reasoning layer's
+    job, which has the actual cited values to reason from.
+
+    If this test ever needs to change to assert ONLY null_type_coercion
+    is reported, that's a deliberate architecture change (adding
+    priority/suppression logic to clustering) and should be made
+    consciously, not as an incidental side effect of an unrelated fix.
+    """
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=50, seed=1)
+    target, affected = coerce_null(
+        source, column="last_transaction_at", sentinel="NULL", affected_fraction=1.0, seed=1
+    )
+    result = compare(source, target, join_columns="account_id")
+    clusters = cluster_mismatches(result)
+
+    cluster = next(c for c in clusters if c.column == "last_transaction_at")
+    matched_ids = {p.pattern_id for p in cluster.candidate_patterns}
+    assert matched_ids == {"null_type_coercion", "enum_drift"}

@@ -36,7 +36,7 @@ from wherefore.reasoning.explain import explain
 from wherefore.synthetic.ground_truth import GroundTruth, list_fixture_ids, load_fixture
 from wherefore.taxonomy.registry import build_llm_taxonomy_menu
 
-from evals.harness.scoring import ScoredCase, score_pattern_match, summarize_run
+from evals.harness.scoring import ScoredCase, score_pattern_match, score_pattern_match_against_candidates, summarize_run
 
 FIXTURES_DIR = Path(__file__).parent.parent / "fixtures"
 
@@ -81,8 +81,12 @@ def _target_clusters_for_fixture(gt, fixtures_dir):
 def run_statistical_eval(fixtures_dir: Path = FIXTURES_DIR) -> list[ScoredCase]:
     """
     Runs the real load -> diff -> cluster pipeline against every
-    fixture and scores clustering's statistical match (the highest-
-    confidence candidate pattern, if any) against ground truth.
+    fixture and scores clustering's statistical match: did the true
+    pattern appear ANYWHERE among the cluster's candidate_patterns,
+    not just as the first one. See scoring.py's
+    score_pattern_match_against_candidates for why this set-membership
+    test, not exact-equality, is the correct one for clustering's
+    output specifically.
     """
     scored_cases = []
     for fixture_id in list_fixture_ids(fixtures_dir):
@@ -91,14 +95,22 @@ def run_statistical_eval(fixtures_dir: Path = FIXTURES_DIR) -> list[ScoredCase]:
         target_clusters, affected_column = _target_clusters_for_fixture(gt, fixtures_dir)
 
         if not target_clusters:
-            predicted_pattern_id = None
+            predicted_pattern_ids = []
         else:
             cluster = target_clusters[0]
-            predicted_pattern_id = (
-                cluster.candidate_patterns[0].pattern_id if cluster.candidate_patterns else None
-            )
+            predicted_pattern_ids = [p.pattern_id for p in cluster.candidate_patterns]
 
-        outcome = score_pattern_match(actual_pattern_id, predicted_pattern_id)
+        outcome = score_pattern_match_against_candidates(actual_pattern_id, predicted_pattern_ids)
+        # For ScoredCase's single predicted_pattern_id field, report the
+        # true pattern if it was among the candidates (so a correct
+        # multi-candidate match still displays as itself, not
+        # misleadingly as whichever candidate happened to be first),
+        # otherwise the first predicted candidate (or None) for visibility.
+        if actual_pattern_id in predicted_pattern_ids:
+            predicted_pattern_id = actual_pattern_id
+        else:
+            predicted_pattern_id = predicted_pattern_ids[0] if predicted_pattern_ids else None
+
         scored_cases.append(
             ScoredCase(
                 fixture_id=fixture_id,

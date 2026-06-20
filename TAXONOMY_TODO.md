@@ -268,7 +268,8 @@ against the registry (same loop just proven for timezone_shift).
 
 ## Remaining patterns (build in this order, easiest signature first)
 
-`truncation` and `enum_drift` are done. `null_type_coercion` is next:
+`truncation`, `enum_drift`, and `null_type_coercion` are done.
+`float_precision` is next:
 
 - [x] `truncation` -- string values cut off at a fixed length.
       Signature: target value is a literal prefix of source, strictly
@@ -281,10 +282,16 @@ against the registry (same loop just proven for timezone_shift).
       same target value, REQUIRING repetition (a value seen once
       proves nothing) -- this requirement was added after catching a
       real false-positive against `truncation` (see above).
-- [ ] `null_type_coercion` -- nulls/blanks coerced into wrong types
-      (empty string vs NaN vs 0 vs "None" the string). Signature
-      candidate: target value is a known "null-like" sentinel where
-      source had a real value, or vice versa.
+- [x] `null_type_coercion` -- nulls coerced to a literal sentinel
+      string ("NULL", "N/A", "None") during migration. Signature:
+      one side is genuinely null (pd.isna()), the other is a known
+      sentinel string, direction-agnostic. Building this pattern
+      surfaced THREE real bugs across the stack -- see the dedicated
+      section above for full detail. Legitimately co-matches
+      enum_drift on some fixtures (a null mapping consistently to one
+      sentinel string is, statistically, also a consistent value
+      mapping) -- this is reported honestly, not suppressed; see
+      cluster_mismatches.py's "On multiple legitimate matches".
 - [ ] `float_precision` -- floating point rounding/precision loss
       during migration. Signature candidate: numeric diff magnitude is
       tiny and consistent with float32/float64 rounding, not a
@@ -306,13 +313,68 @@ against the registry (same loop just proven for timezone_shift).
 
 ## Order rationale
 
-`null_type_coercion` next: like `truncation` and `enum_drift`, it has
-a straightforward signature (target value is a known null-like
-sentinel where source had real data, or vice versa) and exercises a
-NEW dtype family (nulls/type coercion spans numeric AND string
-columns) before `dedup_failure`, which is the one genuinely compound
-case and the real test of the `confirmation_function` escape hatch
-described in schema.py. Worth specifically checking for
-cross-contamination against the three existing string/numeric
-patterns once built, given the real false-positive already caught
-between `truncation` and `enum_drift`.
+`float_precision` next: numeric-only signature (magnitude of
+difference, not type or string shape), giving the taxonomy its first
+pattern that's purely about MAGNITUDE rather than structural/lexical
+shape -- a genuinely different kind of signature to validate before
+`dedup_failure`, the one compound-signature case.
+
+## null_type_coercion: three real bugs found building one pattern
+
+This pattern took meaningfully longer than the previous three because
+it stress-tested parts of the stack the earlier patterns never
+touched -- specifically, what happens when a column has MIXED dtypes
+(real values alongside a literal null sentinel) across the full
+pipeline, not just within one corruptor. Worth understanding all
+three, since they compound: each one only became visible after fixing
+the previous one.
+
+**Bug 1 -- `diff_engine.py`: datacompy's per-row match flag is
+unreliable for ANY row once a column's overall dtype differs between
+source and target.** Confirmed directly: comparing [10.5, 20.5, 30.5]
+(float) against ['10.5', '20.5', '99.9'] (str) makes datacompy report
+ALL THREE rows as mismatched via its own `_match` column -- not just
+the genuinely different one. A naive fix (compare stringified values)
+gets this case right but breaks a different, earlier test
+(`amount` float-vs-str, where 10.5 and '10.5' print identically but
+are a real type-change mismatch that must still be reported). The
+correct fix compares `(type(value), value)` pairs per cell for
+dtype-mismatched columns, bypassing datacompy's flag entirely for
+those columns. See `diff_engine.py`'s `_cell_is_mismatch` and three
+regression tests in `test_diff_engine.py` covering: same type+value
+(suppressed), same printed value but different type (still flagged),
+and genuinely different values (flagged).
+
+**Bug 2 -- `loaders.py`: the original all-or-nothing datetime parser
+silently broke detection of the exact pattern it needed to support.**
+A column with 49 real dates and 1 literal "NULL" string previously
+failed to parse as datetime AT ALL (errors="raise" requires every
+value to succeed) -- meaning the entire column stayed plain strings,
+and the real dates on the unaffected side (which parsed fine, having
+no sentinel) ended up a DIFFERENT dtype than the affected side. This
+diluted the real signal (2 genuine mismatches) under ~49 false
+type-mismatch "mismatches," pushing every signature's confidence
+toward zero. Fixed with a hybrid approach: parse what's parseable as
+real datetimes, preserve the original sentinel text exactly where
+parsing fails, gated by a failure-rate threshold (max 20%) so a
+genuinely non-date column isn't wrongly converted. Critically, this
+does NOT use `errors="coerce"` naively -- coercing failures to NaT
+would destroy the literal sentinel text that null_type_coercion needs
+to detect in the first place.
+
+**Bug 3 -- `evals/harness/`: scoring only the first candidate in
+clustering's output tested registry insertion order, not anything
+clustering actually promises.** Once both Bug 1 and Bug 2 were fixed,
+the null_type_coercion fixture correctly produced TWO legitimate
+candidates (null_type_coercion and enum_drift -- see "On multiple
+legitimate matches" in cluster_mismatches.py). The eval harness scored
+this as a false_negative purely because enum_drift happened to appear
+first in an unordered list. Fixed with
+`score_pattern_match_against_candidates` -- set-membership scoring for
+clustering's multi-candidate output specifically, kept separate from
+`score_pattern_match`'s exact-equality scoring for explain()'s output
+(which DOES commit to exactly one answer, by design, via forced
+tool-use -- so exact equality is the right test there, not set
+membership).
+
+170 tests passing.

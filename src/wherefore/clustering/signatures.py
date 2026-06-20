@@ -21,6 +21,8 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable
 
+import pandas as pd
+
 from wherefore.comparison.diff_result import MismatchRow
 
 
@@ -166,10 +168,74 @@ def consistent_value_mapping(mismatches: list[MismatchRow]) -> float:
     return consistent_count / total
 
 
+_NULL_SENTINEL_STRINGS = {"null", "n/a", "none", "na", "nil", "undefined", "missing"}
+
+
+def null_sentinel_coercion(mismatches: list[MismatchRow]) -> float:
+    """
+    Confidence that mismatches in this cluster are explained by a
+    genuine null being written out as a literal sentinel string (e.g.
+    NaN/NaT/None on the source becoming the text "NULL" on the
+    target) -- the signature null_type_coercion.yaml's detection_hints
+    describes.
+
+    A mismatch counts as evidence FOR this signature only if exactly
+    one side is genuinely null (via pd.isna()) and the OTHER side is a
+    non-null value whose lowercased string form is a known null-like
+    sentinel (see _NULL_SENTINEL_STRINGS). This direction-agnostic
+    design (source-null-target-sentinel OR target-null-source-sentinel)
+    covers migrations going either way.
+
+    Deliberately does NOT count "both sides null but represented
+    differently" (e.g. NaN vs NaT) as evidence -- that's not a type
+    coercion bug, both sides are still genuinely null, just via
+    different pandas null representations; nothing to report there.
+
+    Returns 0.0 for an empty cluster or when no mismatches show this
+    relationship -- e.g. a column where the mismatch is two different
+    REAL values (not a null-vs-sentinel case) correctly scores 0.0, not
+    a false positive.
+    """
+    if not mismatches:
+        return 0.0
+
+    evidence_count = 0
+    for m in mismatches:
+        source_is_null = _is_null(m.source_value)
+        target_is_null = _is_null(m.target_value)
+
+        if source_is_null and target_is_null:
+            continue  # both genuinely null, just different representations -- not evidence
+        if source_is_null and _is_null_sentinel_string(m.target_value):
+            evidence_count += 1
+        elif target_is_null and _is_null_sentinel_string(m.source_value):
+            evidence_count += 1
+
+    return evidence_count / len(mismatches)
+
+
+def _is_null(value) -> bool:
+    try:
+        result = pd.isna(value)
+        # pd.isna on an array-like returns an array; we only ever pass
+        # scalars here, but guard explicitly rather than let a stray
+        # array silently break the truthiness check below.
+        return bool(result)
+    except (TypeError, ValueError):
+        return False
+
+
+def _is_null_sentinel_string(value) -> bool:
+    if not isinstance(value, str):
+        return False
+    return value.strip().lower() in _NULL_SENTINEL_STRINGS
+
+
 SIGNATURE_REGISTRY: dict[str, Callable[[list[MismatchRow]], float]] = {
     "constant_offset_subset": constant_offset_subset,
     "truncated_prefix": truncated_prefix,
     "consistent_value_mapping": consistent_value_mapping,
+    "null_sentinel_coercion": null_sentinel_coercion,
 }
 
 

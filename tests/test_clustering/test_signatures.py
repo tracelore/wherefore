@@ -14,12 +14,14 @@ from wherefore.clustering.signatures import (
     consistent_value_mapping,
     constant_offset_subset,
     get_signature,
+    null_sentinel_coercion,
     truncated_prefix,
 )
 from wherefore.comparison.diff_engine import compare
 from wherefore.comparison.diff_result import MismatchRow
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, HEALTHCARE_PATIENTS, generate_dataset
 from wherefore.synthetic.corruptors.enum_drift import apply as drift
+from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
 from wherefore.synthetic.corruptors.timezone_shift import apply
 from wherefore.synthetic.corruptors.truncation import apply as truncate
 
@@ -206,3 +208,65 @@ def test_empty_cluster_returns_zero_for_consistent_value_mapping():
 
 def test_signature_registry_contains_consistent_value_mapping():
     assert "consistent_value_mapping" in SIGNATURE_REGISTRY
+
+
+def test_real_null_type_coercion_fixture_scores_full_confidence():
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=50, seed=1)
+    target, _ = coerce_null(
+        source, column="last_transaction_at", sentinel="NULL", affected_fraction=1.0, seed=1
+    )
+    result = compare(source, target, join_columns="account_id")
+    confidence = null_sentinel_coercion(result.mismatches_for_column("last_transaction_at"))
+    assert confidence == 1.0
+
+
+def test_unrelated_mismatch_scores_zero_for_null_sentinel_coercion():
+    mismatches = [_make_mismatch(1, "2024-01-01", "2024-01-02")]
+    assert null_sentinel_coercion(mismatches) == 0.0
+
+
+def test_both_sides_null_different_representation_is_not_evidence():
+    """
+    NaN vs NaT are both genuinely null, just different pandas null
+    representations -- this is NOT a type-coercion bug (nothing was
+    coerced to a sentinel STRING), so it must not count as evidence.
+    """
+    mismatches = [MismatchRow(key={"id": 1}, column="x", source_value=float("nan"), target_value=pd.NaT)]
+    assert null_sentinel_coercion(mismatches) == 0.0
+
+
+def test_reverse_direction_source_sentinel_target_null():
+    mismatches = [MismatchRow(key={"id": 1}, column="x", source_value="N/A", target_value=None)]
+    assert null_sentinel_coercion(mismatches) == 1.0
+
+
+def test_does_not_false_positive_on_truncation_or_enum_drift_fixtures():
+    """
+    Cross-contamination check, same discipline as the truncation/
+    enum_drift collision caught earlier in the project: confirms
+    null_sentinel_coercion doesn't fire on the other string-targeting
+    patterns' real fixtures.
+    """
+    source = generate_dataset(HEALTHCARE_PATIENTS, n_rows=30, seed=42)
+
+    target1, _ = truncate(source, column="patient_name", max_length=8, affected_fraction=0.5, seed=1)
+    result1 = compare(source, target1, join_columns="patient_id")
+    assert null_sentinel_coercion(result1.mismatches_for_column("patient_name")) == 0.0
+
+    mapping = {"approved": "APPROVED", "denied": "REJECTED"}
+    target2, _ = drift(source, column="claim_status", value_mapping=mapping, affected_fraction=0.5, seed=1)
+    result2 = compare(source, target2, join_columns="patient_id")
+    assert null_sentinel_coercion(result2.mismatches_for_column("claim_status")) == 0.0
+
+
+def test_case_insensitive_sentinel_matching():
+    mismatches = [MismatchRow(key={"id": 1}, column="x", source_value=None, target_value="null")]
+    assert null_sentinel_coercion(mismatches) == 1.0
+
+
+def test_empty_cluster_returns_zero_for_null_sentinel_coercion():
+    assert null_sentinel_coercion([]) == 0.0
+
+
+def test_signature_registry_contains_null_sentinel_coercion():
+    assert "null_sentinel_coercion" in SIGNATURE_REGISTRY

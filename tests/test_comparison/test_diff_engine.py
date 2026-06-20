@@ -99,6 +99,72 @@ def test_dtype_mismatch_tracked_independently_of_value_mismatch():
     assert len(result.mismatches) == 3  # datacompy does NOT silently coerce across dtypes
 
 
+def test_dtype_mismatch_does_not_falsely_flag_identical_cells():
+    """
+    Regression test for a real bug caught while building
+    null_type_coercion: datacompy's per-row {col}_match flag is
+    UNRELIABLE for every row once a column's overall dtype differs
+    between source and target -- confirmed directly that comparing
+    [10.5, 20.5, 30.5] (float) against ['10.5', '20.5', '99.9'] (str)
+    reports ALL THREE rows as mismatched via datacompy's own _match
+    column, even though rows 1 and 2 have IDENTICAL values once you
+    account for the type change being the point (a float becoming a
+    string is itself the real, reportable finding -- but a row where
+    BOTH the type and value are still genuinely identical on each side,
+    e.g. the same pandas.Timestamp object appearing on both sides after
+    an unrelated null in the same column forced it to object dtype,
+    must not be reported as a mismatch just because the column's
+    overall dtype changed).
+
+    The fix compares (type, value) per cell rather than trusting
+    datacompy's flag or comparing stringified representations -- string
+    comparison was tried and rejected because it gets the `amount`
+    case above WRONG (10.5 and '10.5' print identically but are a real
+    type-change mismatch that must still be reported).
+    """
+    import pandas as pd
+
+    # A column where most cells are genuinely identical Timestamps on
+    # both sides, but ONE cell's source is null and gets coerced to a
+    # string sentinel on the target -- this forces the WHOLE column to
+    # object dtype, which is exactly what null_type_coercion produces.
+    source = pd.DataFrame(
+        {
+            "id": [1, 2, 3],
+            "ts": pd.to_datetime(["2024-01-01", "2024-01-02", None]),
+        }
+    )
+    target = source.copy()
+    target["ts"] = target["ts"].astype(object)
+    target.loc[2, "ts"] = "NULL"
+
+    result = compare(source, target, join_columns="id")
+    # Only row id=3 (the genuinely coerced null) should be a mismatch --
+    # rows 1 and 2 have the identical Timestamp on both sides and must
+    # NOT be falsely flagged just because the column's overall dtype changed.
+    assert len(result.mismatches) == 1
+    assert result.mismatches[0].key == {"id": 3}
+
+
+def test_dtype_mismatch_with_genuinely_different_values_that_print_the_same():
+    """
+    The case that broke a naive string-comparison fix: a float and a
+    string that happen to stringify identically (10.5 vs '10.5') is
+    still a real type-change mismatch and must be reported, even
+    though str(10.5) == '10.5'. This is the case that distinguishes
+    "compare printed representation" (wrong) from "compare type AND
+    value" (right) as the correct fix for the bug above.
+    """
+    source = pd.DataFrame({"id": [1, 2, 3], "val": [10.5, 20.5, 30.5]})
+    target = pd.DataFrame({"id": [1, 2, 3], "val": ["10.5", "20.5", "99.9"]})
+
+    result = compare(source, target, join_columns="id")
+    # All three rows are a real mismatch: rows 1-2 changed TYPE (even
+    # though the printed value looks the same), row 3 changed both
+    # type and value.
+    assert len(result.mismatches) == 3
+
+
 def test_join_columns_excluded_from_column_summary(financial_source):
     """
     Join columns are equal by construction of the join -- they

@@ -35,7 +35,31 @@ Output per cluster: candidate_patterns (possibly empty -- "no match
 above threshold" is communicated by an empty list, not a special
 sentinel) handed to the LLM as either "this looks like X, write the
 causal narrative" or, when empty, explicitly unrecognized so the LLM
-can say so honestly.
+can say so honestly. candidate_patterns can also legitimately contain
+MORE THAN ONE pattern -- see "On multiple legitimate matches" below.
+
+On multiple legitimate matches: clustering deliberately does NOT
+suppress or prioritize one candidate over another when more than one
+signature fires above threshold for the same cluster, even when one
+signature is intuitively "more specific" than another. Real example
+discovered while building null_type_coercion: a column where a
+genuine null was coerced to the literal string "NULL" produces a
+cluster where BOTH null_sentinel_coercion (source=NaT, target="NULL")
+AND consistent_value_mapping (the same source value consistently maps
+to the same target value -- which is also, technically, true here)
+fire at confidence 1.0. It's tempting to add a priority rule
+("null_type_coercion should win because its signature is more
+specific") -- but doing so would mean clustering is making a CAUSAL
+judgment call about which explanation is more plausible, which is
+exactly the kind of inference this layer is designed not to make (see
+"Design reminder" below). Instead, both candidates are reported
+honestly, and disambiguation is left to the reasoning layer, which has
+something clustering never will: the actual cited values and the
+ability to reason in words about which explanation actually fits (e.g.
+"the source being genuinely null, not just present-but-different,
+indicates a type-coercion artifact rather than a deliberate category
+rename"). See test_cluster_mismatches.py for a test locking in this
+behavior as intentional.
 
 Design reminder: this layer must NOT do the LLM's job for it. It
 supplies statistical observations only -- "9 of 9 rows in this cluster

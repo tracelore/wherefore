@@ -1,0 +1,22 @@
+{
+  "fixture_id": "fixture_null_type_coercion_001",
+  "source_file": "fixture_null_type_coercion_001_source.csv",
+  "target_file": "fixture_null_type_coercion_001_target.csv",
+  "injected_corruptions": [
+    {
+      "pattern_id": "null_type_coercion",
+      "params": {
+        "sentinel": "NULL",
+        "affected_fraction": 1.0
+      },
+      "affected_rows": [
+        23,
+        27
+      ],
+      "affected_column": "last_transaction_at"
+    }
+  ],
+  "generation_seed": 1,
+  "domain": "FINANCIAL_ACCOUNTS",
+  "join_column": "account_id"
+}

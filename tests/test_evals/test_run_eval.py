@@ -14,14 +14,14 @@ from evals.harness.scoring import Outcome, summarize_run
 
 def test_real_fixtures_score_correctly_via_statistical_eval():
     """
-    The actual eval run against the four real, committed fixtures.
+    The actual eval run against the five real, committed fixtures.
     Expects 100% statistical accuracy -- if this regresses, something
     upstream broke (a corruptor's output shape changed, a signature's
     confidence threshold logic regressed, dtype-family matching broke
     again, etc.) -- this is the harness doing exactly its job.
     """
     scored_cases = run_statistical_eval()
-    assert len(scored_cases) == 4
+    assert len(scored_cases) == 5
 
     summary = summarize_run(scored_cases)
     assert summary.overall_accuracy() == 1.0
@@ -30,7 +30,25 @@ def test_real_fixtures_score_correctly_via_statistical_eval():
     assert by_fixture["fixture_timezone_shift_001"].outcome == Outcome.TRUE_POSITIVE
     assert by_fixture["fixture_truncation_001"].outcome == Outcome.TRUE_POSITIVE
     assert by_fixture["fixture_enum_drift_001"].outcome == Outcome.TRUE_POSITIVE
+    assert by_fixture["fixture_null_type_coercion_001"].outcome == Outcome.TRUE_POSITIVE
     assert by_fixture["fixture_unrecognized_001"].outcome == Outcome.HONEST_ABSTAIN
+
+
+def test_null_type_coercion_fixture_correctly_scored_despite_co_occurring_candidate():
+    """
+    Regression test for the real bug this fixture exposed: the
+    null_type_coercion fixture's cluster legitimately also matches
+    enum_drift's signature (see cluster_mismatches.py's "On multiple
+    legitimate matches"). Scoring only the FIRST candidate in the list
+    previously scored this as a false_negative purely because of
+    registry insertion order, not because clustering actually failed
+    to surface the true cause. score_pattern_match_against_candidates
+    (set membership, not first-item equality) fixes this.
+    """
+    scored_cases = run_statistical_eval()
+    case = next(c for c in scored_cases if c.fixture_id == "fixture_null_type_coercion_001")
+    assert case.outcome == Outcome.TRUE_POSITIVE
+    assert case.predicted_pattern_id == "null_type_coercion"
 
 
 def test_each_fixture_predicts_its_own_pattern_not_a_different_one():
@@ -46,4 +64,5 @@ def test_each_fixture_predicts_its_own_pattern_not_a_different_one():
     assert by_fixture["fixture_timezone_shift_001"].predicted_pattern_id == "timezone_shift"
     assert by_fixture["fixture_truncation_001"].predicted_pattern_id == "truncation"
     assert by_fixture["fixture_enum_drift_001"].predicted_pattern_id == "enum_drift"
+    assert by_fixture["fixture_null_type_coercion_001"].predicted_pattern_id == "null_type_coercion"
     assert by_fixture["fixture_unrecognized_001"].predicted_pattern_id is None

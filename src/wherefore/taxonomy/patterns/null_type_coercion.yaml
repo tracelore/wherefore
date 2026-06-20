@@ -1,0 +1,52 @@
+id: null_type_coercion
+display_name: "Null/Type Coercion Error"
+category: type_coercion
+
+description: >
+  A genuinely null value (empty, NaN, NaT, None) was written out as a
+  literal sentinel STRING during migration -- e.g. the source had a
+  real empty cell, but the target system wrote the text "NULL",
+  "N/A", or "None" instead of leaving it null. This is a common ETL
+  failure: many export tools and legacy formats represent nulls as
+  literal text rather than a true null, and downstream systems that
+  expect a real null then misinterpret the sentinel text as actual data.
+
+detection_hints:
+  - applies_to_dtypes: ["string", "datetime", "float", "int"]
+    signature: "null_sentinel_coercion"
+    description: >
+      One side of a mismatch is genuinely null (via pandas' isna()),
+      and the other side is a non-null value whose text is a known
+      null-like sentinel ("NULL", "N/A", "None", "NA", "NIL",
+      "UNDEFINED", "MISSING", case-insensitive). Works in either
+      direction (source-null becoming a target sentinel, or vice
+      versa). Two genuinely null values represented differently (e.g.
+      NaN vs NaT) do NOT count as evidence -- both sides are still
+      truly null, so there's no coercion bug to report.
+
+llm_context: >
+  Check which sentinel string appears and how consistently. "NULL"
+  appearing uniformly across many rows in one column suggests a
+  database-level default (e.g. a CAST or COALESCE applied during
+  migration that stringifies nulls). A MIX of different sentinel
+  strings ("NULL", "N/A", "None") within the same column suggests
+  multiple source systems or export paths feeding the same target
+  column without normalization. If only a few specific rows are
+  affected rather than all nulls in the column, consider whether a
+  partial/incremental migration run hit this bug before being fixed.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.null_type_coercion:apply"
+  params_schema:
+    sentinel:
+      type: str
+      default: "NULL"
+      description: "The literal sentinel string a genuine null gets coerced to"
+    affected_fraction:
+      type: float
+      default: 0.6
+      description: "Fraction of the column's genuinely null rows to corrupt"
+
+severity_default: medium
+references:
+  - "https://en.wikipedia.org/wiki/Null_(SQL)"

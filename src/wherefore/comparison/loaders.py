@@ -69,41 +69,78 @@ def load_csv(path: str | Path, encoding: str = "utf-8") -> pd.DataFrame:
 
 def _try_parse_datetime_columns(df: pd.DataFrame) -> pd.DataFrame:
     """
-    For each string/object column, attempts strict ISO8601 datetime
-    parsing and converts the column if every non-null value parses
-    successfully. Deliberately conservative:
+    For each string/object column that looks like it's mostly
+    datetimes, parses the parseable values as real datetimes while
+    PRESERVING THE ORIGINAL TEXT for any value that fails to parse --
+    rather than either (a) requiring every value to parse (the
+    original, stricter version of this function) or (b) coercing
+    failures to NaT.
 
-    - Skips columns where every value is purely digits (e.g. "2024",
-      "2025") -- confirmed directly that pd.to_datetime with
-      format='ISO8601' WILL happily parse bare years as Jan 1st of
-      that year, which would silently and wrongly convert a
-      fiscal-year or birth-year column into fabricated timestamps.
-      Genuine ISO8601 timestamps always contain a '-' or ':' separator,
-      so requiring at least one non-digit character is a cheap,
-      effective guard against this specific false positive.
-    - Uses errors='raise' via a try/except, not errors='coerce' --
-      coerce would silently turn unparseable values into NaT, which
-      could convert a column that's mostly-but-not-entirely dates
-      into something half-fabricated. Only convert when EVERY value
-      parses cleanly.
+    This distinction matters concretely: a real migration bug this
+    tool needs to detect is a genuine null being written as the
+    literal string "NULL" in the target file, sitting among otherwise-
+    real dates. Confirmed by direct testing that BOTH alternatives are
+    wrong for this case:
+      - errors="raise" (the original approach): the single "NULL"
+        value blocks the ENTIRE column from being recognized as
+        datetime, leaving every value -- including the 49 genuine
+        dates -- as plain strings. Confirmed this caused the
+        null_type_coercion pattern to be statistically undetectable
+        once loaded from a real CSV file (diluted by ~49 spurious
+        type-mismatch "mismatches" against the source file, which DID
+        parse cleanly since it had no sentinel string).
+      - errors="coerce": correctly parses the real dates, but ALSO
+        silently turns "NULL" into NaT -- destroying the exact
+        evidence null_type_coercion needs (a literal sentinel STRING
+        next to a genuine null), making both sides look like ordinary
+        matching nulls.
+
+    The fix: parse with errors="coerce" to find out which values are
+    genuinely parseable, then build a column with REAL datetimes where
+    parsing succeeded and the ORIGINAL STRING preserved exactly where
+    it failed. Gated by a failure-rate threshold (max 20% of non-null
+    values may fail to parse) so a column that's mostly garbage isn't
+    wrongly treated as "a date column with some sentinel values" --
+    that threshold is a judgment call, not derived from a hard
+    constraint; revisit if a real-world column shows this guard is
+    too strict or too loose in practice.
+
+    The bare-digit-years guard (e.g. "2024", "2025" parsing as
+    Jan 1st of that year) is unchanged from the original version --
+    confirmed directly that pd.to_datetime with format='ISO8601'
+    parses bare numeric strings as dates, which would wrongly convert
+    a fiscal-year/birth-year column.
     """
+    MAX_PARSE_FAILURE_RATE = 0.2
+
     df = df.copy()
     for col in df.columns:
         if df[col].dtype.name not in ("object", "str"):
             continue
 
-        non_null = df[col].dropna()
+        non_null_mask = df[col].notna()
+        non_null = df[col][non_null_mask]
         if len(non_null) == 0:
             continue
         if all(str(v).isdigit() for v in non_null):
             continue  # bare numeric strings (years, IDs) -- not a datetime column
 
-        try:
-            parsed = pd.to_datetime(df[col], errors="raise", format="ISO8601")
-        except (ValueError, TypeError):
-            continue
+        parsed = pd.to_datetime(df[col], errors="coerce", format="ISO8601")
+        # A value parsed to NaT either because it genuinely failed to
+        # parse, OR because it was already null in the original column
+        # -- only the FORMER should be treated as a parse failure for
+        # the threshold check and have its original text restored.
+        parse_failed_mask = parsed.isna() & non_null_mask
+        failure_rate = parse_failed_mask.sum() / len(non_null)
 
-        df[col] = parsed
+        if failure_rate == 0:
+            df[col] = parsed
+        elif failure_rate <= MAX_PARSE_FAILURE_RATE:
+            hybrid = parsed.astype(object)
+            hybrid[parse_failed_mask] = df[col][parse_failed_mask]
+            df[col] = hybrid
+        # else: failure rate too high -- leave the column as-is, it's
+        # probably not actually a datetime column at all.
 
     return df
 

@@ -26,6 +26,7 @@ from wherefore.synthetic.base_dataset import (
     generate_dataset,
 )
 from wherefore.synthetic.corruptors.enum_drift import apply as drift_enum
+from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
 from wherefore.synthetic.corruptors.timezone_shift import apply as shift_timezone
 from wherefore.synthetic.corruptors.truncation import apply as truncate
 from wherefore.synthetic.ground_truth import GroundTruth, InjectedCorruption, write_fixture
@@ -106,6 +107,30 @@ def build_enum_drift_fixture(fixture_id: str, seed: int) -> None:
     write_fixture(gt, source, target, FIXTURES_DIR)
 
 
+def build_null_type_coercion_fixture(fixture_id: str, seed: int) -> None:
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=50, seed=seed)
+    target, affected_rows = coerce_null(
+        source, column="last_transaction_at", sentinel="NULL", affected_fraction=1.0, seed=seed
+    )
+    gt = GroundTruth(
+        fixture_id=fixture_id,
+        source_file=f"{fixture_id}_source.csv",
+        target_file=f"{fixture_id}_target.csv",
+        injected_corruptions=[
+            InjectedCorruption(
+                pattern_id="null_type_coercion",
+                params={"sentinel": "NULL", "affected_fraction": 1.0},
+                affected_rows=affected_rows,
+                affected_column="last_transaction_at",
+            )
+        ],
+        generation_seed=seed,
+        domain="FINANCIAL_ACCOUNTS",
+        join_column="account_id",
+    )
+    write_fixture(gt, source, target, FIXTURES_DIR)
+
+
 def build_unrecognized_fixture(fixture_id: str, seed: int) -> None:
     """
     A genuinely unrecognized case -- random, non-matching corruption
@@ -136,8 +161,9 @@ def main() -> None:
     build_timezone_shift_fixture("fixture_timezone_shift_001", seed=42)
     build_truncation_fixture("fixture_truncation_001", seed=42)
     build_enum_drift_fixture("fixture_enum_drift_001", seed=42)
+    build_null_type_coercion_fixture("fixture_null_type_coercion_001", seed=1)
     build_unrecognized_fixture("fixture_unrecognized_001", seed=42)
-    print(f"Wrote 4 fixtures to {FIXTURES_DIR}")
+    print(f"Wrote 5 fixtures to {FIXTURES_DIR}")
 
 
 if __name__ == "__main__":
