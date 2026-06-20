@@ -26,6 +26,7 @@ from wherefore.synthetic.base_dataset import (
     generate_dataset,
 )
 from wherefore.synthetic.corruptors.enum_drift import apply as drift_enum
+from wherefore.synthetic.corruptors.float_precision import apply as drift_float
 from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
 from wherefore.synthetic.corruptors.timezone_shift import apply as shift_timezone
 from wherefore.synthetic.corruptors.truncation import apply as truncate
@@ -131,6 +132,28 @@ def build_null_type_coercion_fixture(fixture_id: str, seed: int) -> None:
     write_fixture(gt, source, target, FIXTURES_DIR)
 
 
+def build_float_precision_fixture(fixture_id: str, seed: int) -> None:
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=seed)
+    target, affected_rows = drift_float(source, column="balance", affected_fraction=0.5, seed=seed)
+    gt = GroundTruth(
+        fixture_id=fixture_id,
+        source_file=f"{fixture_id}_source.csv",
+        target_file=f"{fixture_id}_target.csv",
+        injected_corruptions=[
+            InjectedCorruption(
+                pattern_id="float_precision",
+                params={"affected_fraction": 0.5},
+                affected_rows=affected_rows,
+                affected_column="balance",
+            )
+        ],
+        generation_seed=seed,
+        domain="FINANCIAL_ACCOUNTS",
+        join_column="account_id",
+    )
+    write_fixture(gt, source, target, FIXTURES_DIR)
+
+
 def build_unrecognized_fixture(fixture_id: str, seed: int) -> None:
     """
     A genuinely unrecognized case -- random, non-matching corruption
@@ -162,8 +185,9 @@ def main() -> None:
     build_truncation_fixture("fixture_truncation_001", seed=42)
     build_enum_drift_fixture("fixture_enum_drift_001", seed=42)
     build_null_type_coercion_fixture("fixture_null_type_coercion_001", seed=1)
+    build_float_precision_fixture("fixture_float_precision_001", seed=1)
     build_unrecognized_fixture("fixture_unrecognized_001", seed=42)
-    print(f"Wrote 5 fixtures to {FIXTURES_DIR}")
+    print(f"Wrote 6 fixtures to {FIXTURES_DIR}")
 
 
 if __name__ == "__main__":

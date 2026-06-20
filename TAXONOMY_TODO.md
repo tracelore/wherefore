@@ -268,8 +268,8 @@ against the registry (same loop just proven for timezone_shift).
 
 ## Remaining patterns (build in this order, easiest signature first)
 
-`truncation`, `enum_drift`, and `null_type_coercion` are done.
-`float_precision` is next:
+`truncation`, `enum_drift`, `null_type_coercion`, and `float_precision`
+are done. `encoding_mismatch` is next:
 
 - [x] `truncation` -- string values cut off at a fixed length.
       Signature: target value is a literal prefix of source, strictly
@@ -292,10 +292,12 @@ against the registry (same loop just proven for timezone_shift).
       sentinel string is, statistically, also a consistent value
       mapping) -- this is reported honestly, not suppressed; see
       cluster_mismatches.py's "On multiple legitimate matches".
-- [ ] `float_precision` -- floating point rounding/precision loss
-      during migration. Signature candidate: numeric diff magnitude is
-      tiny and consistent with float32/float64 rounding, not a
-      meaningful value change.
+- [x] `float_precision` -- floating point rounding/precision loss
+      during migration. Signature: checks the EXACT float32
+      round-trip (float(numpy.float32(source)) == target) rather than
+      a relative-magnitude threshold -- see "float_precision: a
+      signature-design lesson" below for why the magnitude approach
+      was tried first and rejected after a real false positive.
 - [ ] `encoding_mismatch` -- UTF-8 vs Latin-1 (or similar) decode
       errors. Signature candidate: target string contains
       mojibake-pattern characters (specific byte-sequence artifacts)
@@ -313,11 +315,11 @@ against the registry (same loop just proven for timezone_shift).
 
 ## Order rationale
 
-`float_precision` next: numeric-only signature (magnitude of
-difference, not type or string shape), giving the taxonomy its first
-pattern that's purely about MAGNITUDE rather than structural/lexical
-shape -- a genuinely different kind of signature to validate before
-`dedup_failure`, the one compound-signature case.
+`encoding_mismatch` next: a genuinely new signature SHAPE again (byte-
+level artifact detection in text, not magnitude or structure), and a
+good candidate to validate the "real evidence before YAML" discipline
+once more before `dedup_failure`, the one genuinely compound case and
+the real test of the `confirmation_function` escape hatch.
 
 ## null_type_coercion: three real bugs found building one pattern
 
@@ -378,3 +380,34 @@ tool-use -- so exact equality is the right test there, not set
 membership).
 
 170 tests passing.
+
+## float_precision: a signature-design lesson
+
+Worth recording on its own, since it's a good illustration of how a
+plausible-sounding statistical heuristic can quietly hide a real
+false-positive. The first version of `float32_precision_drift`
+checked whether the RELATIVE magnitude of a mismatch's delta was
+below a small threshold (motivated by direct testing showing float32
+rounding loss has a relative magnitude around 1e-8, an order of
+magnitude smaller than other plausible small-delta bugs). This worked
+on the real fixture -- until a deliberately adversarial test case was
+tried: a one-cent rounding bug on a six-figure value (98762.17 ->
+98762.18). Because the BASE VALUE is large, a one-cent absolute change
+has a relative magnitude small enough to fall within a reasonable
+float32-precision threshold, even though 98762.17 actually rounds to
+98762.171875 in float32 -- nowhere near 98762.18. The heuristic scored
+this case 0.5 confidence: a real false positive.
+
+The fix replaced the heuristic with a deterministic check: does
+`float(numpy.float32(source))` EXACTLY equal the target? This isn't
+approximating the mechanism, it's verifying it directly -- and it
+correctly rejects the cents-rounding case (0.0 confidence) while still
+correctly scoring the real float_precision fixture at 1.0. The general
+lesson, worth remembering for any future signature: when a magnitude-
+based threshold is standing in for a mechanism that's actually
+deterministic and checkable (a specific rounding operation, a specific
+encoding transformation, etc.), check the mechanism directly rather
+than approximating its statistical footprint -- the approximation can
+fail in exactly the cases a threshold is supposed to guard against.
+
+189 tests passing.

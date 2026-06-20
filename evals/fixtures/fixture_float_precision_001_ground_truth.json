@@ -1,0 +1,35 @@
+{
+  "fixture_id": "fixture_float_precision_001",
+  "source_file": "fixture_float_precision_001_source.csv",
+  "target_file": "fixture_float_precision_001_target.csv",
+  "injected_corruptions": [
+    {
+      "pattern_id": "float_precision",
+      "params": {
+        "affected_fraction": 0.5
+      },
+      "affected_rows": [
+        2,
+        3,
+        4,
+        10,
+        14,
+        17,
+        18,
+        19,
+        20,
+        21,
+        22,
+        23,
+        24,
+        25,
+        26,
+        27
+      ],
+      "affected_column": "balance"
+    }
+  ],
+  "generation_seed": 1,
+  "domain": "FINANCIAL_ACCOUNTS",
+  "join_column": "account_id"
+}

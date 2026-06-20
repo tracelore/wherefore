@@ -42,15 +42,19 @@ What's real today:
   enforced by a structural test, not just convention
 - The taxonomy system: failure patterns are defined as data (YAML), not
   code, validated against a strict schema — see [Architecture](#architecture)
-- Four fully implemented, end-to-end-tested failure patterns:
-  `timezone_shift`, `truncation`, `enum_drift`, and
-  `null_type_coercion` — corruptor → detection signature → registry →
+- Five fully implemented, end-to-end-tested failure patterns:
+  `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`,
+  and `float_precision` — corruptor → detection signature → registry →
   real diff → real cluster match → real CLI report, each proven
   against real files. Building the fourth pattern surfaced three real
   bugs spanning the comparison engine, the loaders, and the eval
-  harness itself — see [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for
-  the full account, since it's a good illustration of how integration
-  testing catches what unit tests alone can't.
+  harness itself, and the fifth surfaced a subtler lesson — a
+  magnitude-based heuristic that looked right scored a real false
+  positive on an adversarial test case, fixed by checking the
+  underlying mechanism (an exact float32 round-trip) directly instead
+  of approximating its size — see
+  [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md) for the full account of
+  both.
 - The AI reasoning layer is built and **verified against the real
   Claude API**: a `ClusterExplanation` schema, a swappable `Provider`
   interface, and a real Claude integration that uses *forced* tool-use
@@ -149,16 +153,17 @@ named the wrong pattern" — those are very different failure modes a
 naive right/wrong scorer would conflate.
 
 **Current results, statistical mode (clustering's signature match,
-free, no API key), against all 5 committed fixtures:**
+free, no API key), against all 6 committed fixtures:**
 
 ```
 $ python3 -m evals.harness.run_eval
 === Statistical eval (clustering only, free, no API key) ===
-Total cases: 5
+Total cases: 6
 Overall accuracy (correct match + honest abstain): 100.00%
-Outcome breakdown: {'true_positive': 4, 'honest_abstain': 1}
+Outcome breakdown: {'true_positive': 5, 'honest_abstain': 1}
 
   enum_drift: precision=1.00 recall=1.00 (TP=1 FP=0 FN=0)
+  float_precision: precision=1.00 recall=1.00 (TP=1 FP=0 FN=0)
   null_type_coercion: precision=1.00 recall=1.00 (TP=1 FP=0 FN=0)
   timezone_shift: precision=1.00 recall=1.00 (TP=1 FP=0 FN=0)
   truncation: precision=1.00 recall=1.00 (TP=1 FP=0 FN=0)
@@ -186,7 +191,7 @@ and is gated the same way `--explain` is in the CLI — requires
 `ANTHROPIC_API_KEY`, off by default. Run it yourself:
 `python3 -m evals.harness.run_eval --llm`.
 
-Five fixtures is a small sample — enough to prove the harness itself
+Six fixtures is a small sample — enough to prove the harness itself
 works correctly, not enough to claim robust statistical confidence.
 Expanding fixture coverage (more examples per pattern, edge cases,
 multi-corruption fixtures) is tracked in
@@ -201,7 +206,7 @@ cd wherefore
 ```
 
 This creates a `.venv/`, installs the package in editable mode with dev
-dependencies, and runs the test suite (should show **170 passed**). It's
+dependencies, and runs the test suite (should show **189 passed**). It's
 safe to re-run — it skips recreating an existing `.venv`.
 
 **No API key needed for this.** The test suite covers the AI reasoning
@@ -311,9 +316,9 @@ guess, and (with `--explain`) the AI does the same: in testing, it
 correctly identified a genuinely random, non-matching corruption and
 proposed real alternative hypotheses (a bad join, a mis-wired column)
 instead of inventing a pattern that wasn't there. Right now the
-taxonomy has four patterns (`timezone_shift`, `truncation`,
-`enum_drift`, `null_type_coercion`); more are being added, tracked in
-[`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
+taxonomy has five patterns (`timezone_shift`, `truncation`,
+`enum_drift`, `null_type_coercion`, `float_precision`); more are being
+added, tracked in [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
 
 <details>
 <summary>All flags</summary>

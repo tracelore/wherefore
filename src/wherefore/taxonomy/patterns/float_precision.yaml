@@ -1,0 +1,51 @@
+id: float_precision
+display_name: "Floating-Point Precision Loss"
+category: numeric
+
+description: >
+  A numeric column lost precision during migration in a way consistent
+  with being rounded through 32-bit floating-point representation --
+  typically because the target column was defined as a single-precision
+  type (REAL, FLOAT4) instead of double-precision (DOUBLE, FLOAT8), or
+  because the value passed through a lower-precision intermediate
+  format (e.g. a 32-bit serialization step, or arithmetic performed in
+  float32 somewhere in the pipeline).
+
+detection_hints:
+  - applies_to_dtypes: ["float"]
+    signature: "float32_precision_drift"
+    description: >
+      For each mismatched value, checks whether the target value
+      equals the EXACT result of rounding the source value through
+      float32 precision (float(numpy.float32(source)) == target).
+      This is a deterministic, verifiable fact about the data, not a
+      magnitude-based heuristic -- confirmed by direct testing that a
+      magnitude threshold alone (e.g. "relative delta below some small
+      number") produces false positives on large-value cents-rounding
+      bugs, since a one-cent change on a six-figure value can have a
+      relative magnitude small enough to look like float32 noise even
+      though it isn't actually the result of float32 rounding.
+
+llm_context: >
+  If every affected value's exact float32 representation matches the
+  target, this strongly suggests a schema/type mismatch (REAL vs
+  DOUBLE column definition) rather than an application-level rounding
+  bug -- a deliberate "round to 2 decimal places" business rule would
+  produce clean decimal values, not float32's binary rounding
+  artifacts (e.g. 128775.18 becoming 128775.1796875, not 128775.18 or
+  128775.2). Check whether the affected column is a currency/money
+  field -- those are especially sensitive to this bug since the
+  precision loss can compound across aggregations downstream.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.float_precision:apply"
+  params_schema:
+    affected_fraction:
+      type: float
+      default: 0.5
+      description: "Fraction of non-null rows in the column to round through float32"
+
+severity_default: high
+references:
+  - "https://en.wikipedia.org/wiki/Single-precision_floating-point_format"
+  - "https://en.wikipedia.org/wiki/Double-precision_floating-point_format"

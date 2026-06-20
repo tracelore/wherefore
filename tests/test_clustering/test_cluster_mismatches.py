@@ -20,6 +20,7 @@ from wherefore.clustering.cluster_mismatches import (
 from wherefore.comparison.diff_engine import compare
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, HEALTHCARE_PATIENTS, generate_dataset
 from wherefore.synthetic.corruptors.enum_drift import apply as drift
+from wherefore.synthetic.corruptors.float_precision import apply as drift_float
 from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
 from wherefore.synthetic.corruptors.timezone_shift import apply
 from wherefore.synthetic.corruptors.truncation import apply as truncate
@@ -220,3 +221,22 @@ def test_null_coerced_to_sentinel_legitimately_matches_two_patterns_by_design():
     cluster = next(c for c in clusters if c.column == "last_transaction_at")
     matched_ids = {p.pattern_id for p in cluster.candidate_patterns}
     assert matched_ids == {"null_type_coercion", "enum_drift"}
+
+
+def test_float_precision_matches_cleanly_alongside_other_corruptions():
+    """
+    float_precision and null_type_coercion both target float-dtype
+    columns, so confirm a real float_precision corruption on one
+    column produces exactly its own pattern, with no cross-talk, even
+    in a dataset that also has unrelated corruptions on other columns.
+    """
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=1)
+    target, _ = drift_float(source, column="balance", affected_fraction=0.5, seed=1)
+    target, _ = apply(target, column="opened_at", offset_hours=5.0, affected_fraction=0.3, seed=2)
+
+    result = compare(source, target, join_columns="account_id")
+    clusters = cluster_mismatches(result)
+    clusters_by_column = {c.column: c for c in clusters}
+
+    assert [p.pattern_id for p in clusters_by_column["balance"].candidate_patterns] == ["float_precision"]
+    assert [p.pattern_id for p in clusters_by_column["opened_at"].candidate_patterns] == ["timezone_shift"]

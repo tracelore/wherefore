@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections import Counter
 from typing import Callable
 
+import numpy as np
 import pandas as pd
 
 from wherefore.comparison.diff_result import MismatchRow
@@ -231,11 +232,63 @@ def _is_null_sentinel_string(value) -> bool:
     return value.strip().lower() in _NULL_SENTINEL_STRINGS
 
 
+def float32_precision_drift(mismatches: list[MismatchRow]) -> float:
+    """
+    Confidence that mismatches in this cluster are explained by values
+    being rounded through float32 precision -- the signature
+    float_precision.yaml's detection_hints describes. A real migration
+    cause: a column defined as REAL/FLOAT4 on the target instead of
+    DOUBLE/FLOAT8, or a value passing through a lower-precision
+    serialization step.
+
+    Checks the EXACT float32 round-trip: does float(np.float32(source))
+    equal the target value? This is a deterministic, verifiable fact
+    about the data, not a magnitude-based heuristic.
+
+    A magnitude-based heuristic (e.g. "relative delta below some small
+    threshold") was tried first and rejected after direct testing
+    surfaced a real false-positive: a one-cent rounding bug on a large
+    value (98762.17 -> 98762.18) has a relative magnitude small enough
+    to fall within a reasonable float32-precision threshold, even
+    though it has NOTHING to do with float32 rounding -- 98762.17
+    actually rounds to 98762.171875 in float32, not 98762.18. Pure
+    magnitude can't distinguish "coincidentally small relative change"
+    from "this specific value's actual float32 representation," but
+    the exact round-trip check can, since it's checking the real
+    mechanism rather than approximating its size.
+
+    Returns 0.0 for an empty cluster or non-numeric values.
+    """
+    if not mismatches:
+        return 0.0
+
+    evidence_count = 0
+    total_comparable = 0
+    for m in mismatches:
+        try:
+            source_val = float(m.source_value)
+            target_val = float(m.target_value)
+        except (TypeError, ValueError):
+            continue
+
+        total_comparable += 1
+        if source_val == target_val:
+            continue  # not a mismatch at all; shouldn't normally appear here, but not evidence either way
+        if float(np.float32(source_val)) == target_val:
+            evidence_count += 1
+
+    if total_comparable == 0:
+        return 0.0
+
+    return evidence_count / total_comparable
+
+
 SIGNATURE_REGISTRY: dict[str, Callable[[list[MismatchRow]], float]] = {
     "constant_offset_subset": constant_offset_subset,
     "truncated_prefix": truncated_prefix,
     "consistent_value_mapping": consistent_value_mapping,
     "null_sentinel_coercion": null_sentinel_coercion,
+    "float32_precision_drift": float32_precision_drift,
 }
 
 

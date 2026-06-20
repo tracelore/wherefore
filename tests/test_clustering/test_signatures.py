@@ -13,6 +13,7 @@ from wherefore.clustering.signatures import (
     SIGNATURE_REGISTRY,
     consistent_value_mapping,
     constant_offset_subset,
+    float32_precision_drift,
     get_signature,
     null_sentinel_coercion,
     truncated_prefix,
@@ -21,6 +22,7 @@ from wherefore.comparison.diff_engine import compare
 from wherefore.comparison.diff_result import MismatchRow
 from wherefore.synthetic.base_dataset import FINANCIAL_ACCOUNTS, HEALTHCARE_PATIENTS, generate_dataset
 from wherefore.synthetic.corruptors.enum_drift import apply as drift
+from wherefore.synthetic.corruptors.float_precision import apply as drift_float
 from wherefore.synthetic.corruptors.null_type_coercion import apply as coerce_null
 from wherefore.synthetic.corruptors.timezone_shift import apply
 from wherefore.synthetic.corruptors.truncation import apply as truncate
@@ -270,3 +272,74 @@ def test_empty_cluster_returns_zero_for_null_sentinel_coercion():
 
 def test_signature_registry_contains_null_sentinel_coercion():
     assert "null_sentinel_coercion" in SIGNATURE_REGISTRY
+
+
+def test_real_float_precision_fixture_scores_full_confidence():
+    source = generate_dataset(FINANCIAL_ACCOUNTS, n_rows=30, seed=1)
+    target, _ = drift_float(source, column="balance", affected_fraction=0.5, seed=1)
+    result = compare(source, target, join_columns="account_id")
+    confidence = float32_precision_drift(result.mismatches_for_column("balance"))
+    assert confidence == 1.0
+
+
+def test_cents_rounding_bug_on_large_value_does_not_false_positive():
+    """
+    THE regression test for a real bug caught while building this
+    signature: a magnitude-based heuristic (relative delta below a
+    threshold) was tried first and scored this case as 0.5 confidence
+    -- a one-cent rounding bug on a six-figure value (98762.17 ->
+    98762.18) has a relative magnitude small enough to coincidentally
+    look like float32 noise, even though 98762.17 actually rounds to
+    98762.171875 in float32, not 98762.18. The fix checks the EXACT
+    float32 round-trip instead of approximating its size, which
+    correctly rejects this case.
+    """
+    mismatches = [
+        _make_mismatch(1, 98762.17, 98762.18),
+        _make_mismatch(2, 500.00, 500.01),
+    ]
+    assert float32_precision_drift(mismatches) == 0.0
+
+
+def test_unrelated_large_change_scores_zero():
+    mismatches = [_make_mismatch(1, 100.0, 999.0)]
+    assert float32_precision_drift(mismatches) == 0.0
+
+
+def test_non_numeric_values_excluded_not_crashed():
+    mismatches = [_make_mismatch(1, "abc", "def")]
+    assert float32_precision_drift(mismatches) == 0.0
+
+
+def test_does_not_false_positive_on_other_string_or_datetime_fixtures():
+    source = generate_dataset(HEALTHCARE_PATIENTS, n_rows=30, seed=42)
+
+    target1, _ = truncate(source, column="patient_name", max_length=8, affected_fraction=0.5, seed=1)
+    result1 = compare(source, target1, join_columns="patient_id")
+    assert float32_precision_drift(result1.mismatches_for_column("patient_name")) == 0.0
+
+    mapping = {"approved": "APPROVED", "denied": "REJECTED"}
+    target2, _ = drift(source, column="claim_status", value_mapping=mapping, affected_fraction=0.5, seed=1)
+    result2 = compare(source, target2, join_columns="patient_id")
+    assert float32_precision_drift(result2.mismatches_for_column("claim_status")) == 0.0
+
+
+def test_does_not_false_positive_on_null_type_coercion_fixture_same_float_column():
+    """
+    Cross-contamination check specific to sharing the same dtype
+    family: both null_type_coercion and float_precision target float
+    columns, so confirm a null-coerced-to-sentinel fixture on a float
+    column doesn't also trigger float32_precision_drift.
+    """
+    source = generate_dataset(HEALTHCARE_PATIENTS, n_rows=30, seed=1)
+    target, _ = coerce_null(source, column="billed_amount", sentinel="NULL", affected_fraction=1.0, seed=1)
+    result = compare(source, target, join_columns="patient_id")
+    assert float32_precision_drift(result.mismatches_for_column("billed_amount")) == 0.0
+
+
+def test_empty_cluster_returns_zero_for_float32_precision_drift():
+    assert float32_precision_drift([]) == 0.0
+
+
+def test_signature_registry_contains_float32_precision_drift():
+    assert "float32_precision_drift" in SIGNATURE_REGISTRY
