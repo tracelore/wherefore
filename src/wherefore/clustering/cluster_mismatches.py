@@ -112,6 +112,134 @@ class Cluster:
         return len(self.candidate_patterns) == 0
 
 
+@dataclass
+class RowPresenceMatch:
+    """
+    Like PatternMatch, but for row-presence patterns (dedup_failure,
+    key_mismatch) -- statistical facts only, no causal language, same
+    principle as PatternMatch.
+    """
+
+    pattern_id: str
+    signature_name: str
+    confidence: float
+
+
+@dataclass
+class RowPresenceCluster:
+    """
+    A row-presence finding -- rows present on only one side of the
+    comparison, plus whichever row-presence patterns' detectors fired
+    for them. Deliberately SEPARATE from Cluster (which groups
+    COLUMN-level mismatches): a row that's entirely missing/extra has
+    no "source_value -> target_value" pair to report, since there's no
+    matched row to compare against. Confirmed by direct testing this
+    is a structurally different finding -- a duplicated row (re-
+    inserted with a new auto-generated key during a migration retry)
+    produces ZERO column-level mismatches; it shows up entirely as an
+    extra row in target_only_rows, which the column-based Cluster path
+    has no way to see at all.
+    """
+
+    side: str  # "source_only" or "target_only"
+    rows: list  # list[RowPresenceRecord]
+    candidate_patterns: list[RowPresenceMatch] = field(default_factory=list)
+
+    @property
+    def is_unrecognized(self) -> bool:
+        return len(self.candidate_patterns) == 0
+
+
+def detect_row_presence_patterns(
+    diff_result: DiffResult,
+    source_df=None,
+    target_df=None,
+    confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,
+) -> list[RowPresenceCluster]:
+    """
+    Examines diff_result.source_only_rows/target_only_rows for
+    row-presence patterns (currently: dedup_failure) -- the
+    counterpart to cluster_mismatches() for findings that show up as
+    entirely missing/extra rows rather than column-level value
+    mismatches. Kept as a SEPARATE function (not folded into
+    cluster_mismatches() itself) so the widely-used
+    cluster_mismatches() -> list[Cluster] signature and return type
+    stay completely unchanged for existing callers; this is purely
+    additive.
+
+    `source_df`/`target_df` are optional -- WITHOUT them, only
+    presence itself is reported (rows exist on only one side,
+    candidate_patterns will be empty/unrecognized, since dedup_failure
+    detection specifically needs to check an unmatched row's VALUES
+    against the full set of MATCHED rows, which isn't available from
+    diff_result alone -- see RowPresenceRecord's docstring for why
+    key-only data isn't enough). Pass them when available (the CLI and
+    eval harness both have them) to get real pattern detection.
+    """
+    if not 0.0 <= confidence_threshold <= 1.0:
+        raise ValueError(f"confidence_threshold must be in [0, 1], got {confidence_threshold}")
+
+    clusters: list[RowPresenceCluster] = []
+
+    if diff_result.target_only_rows:
+        candidates = _detect_row_presence_candidates(
+            diff_result.target_only_rows,
+            comparison_df=source_df,
+            join_columns=diff_result.join_columns,
+            confidence_threshold=confidence_threshold,
+        )
+        clusters.append(
+            RowPresenceCluster(side="target_only", rows=diff_result.target_only_rows, candidate_patterns=candidates)
+        )
+
+    if diff_result.source_only_rows:
+        candidates = _detect_row_presence_candidates(
+            diff_result.source_only_rows,
+            comparison_df=target_df,
+            join_columns=diff_result.join_columns,
+            confidence_threshold=confidence_threshold,
+        )
+        clusters.append(
+            RowPresenceCluster(side="source_only", rows=diff_result.source_only_rows, candidate_patterns=candidates)
+        )
+
+    return clusters
+
+
+def _detect_row_presence_candidates(
+    unmatched_rows: list,
+    comparison_df,
+    join_columns: list[str],
+    confidence_threshold: float,
+) -> list[RowPresenceMatch]:
+    """
+    Currently implements dedup_failure detection directly (not via the
+    taxonomy registry's dtype-based dispatch, since row-presence
+    patterns don't have a column/dtype to dispatch on the way
+    column-based patterns do -- this is a deliberate, narrower path
+    for the one row-presence pattern that exists so far). If/when a
+    second row-presence pattern is added, this should be revisited to
+    decide whether a registry-style dispatch is worth the complexity
+    at that point, rather than guessing now.
+    """
+    if comparison_df is None:
+        return []
+
+    from wherefore.clustering.signatures import duplicate_content_fraction
+
+    confidence = duplicate_content_fraction(unmatched_rows, comparison_df, join_columns)
+    if confidence < confidence_threshold:
+        return []
+
+    return [
+        RowPresenceMatch(
+            pattern_id="dedup_failure",
+            signature_name="duplicate_content_fraction",
+            confidence=confidence,
+        )
+    ]
+
+
 def cluster_mismatches(
     diff_result: DiffResult,
     confidence_threshold: float = DEFAULT_CONFIDENCE_THRESHOLD,

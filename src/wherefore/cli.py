@@ -31,6 +31,7 @@ from wherefore.clustering.cluster_mismatches import (
     DEFAULT_CONFIDENCE_THRESHOLD,
     Cluster,
     cluster_mismatches,
+    detect_row_presence_patterns,
 )
 from wherefore.comparison.diff_engine import compare as run_diff
 from wherefore.comparison.key_matching import fuzzy_match_keys
@@ -72,6 +73,7 @@ class ComparisonRunResult:
     join_column: str
     diff_result: object
     clusters: list
+    row_presence_clusters: list
     explanations: dict
     redaction_categories: set[str]
 
@@ -106,6 +108,9 @@ def _run_comparison(
 
     diff_result = run_diff(source_df, target_df, join_columns=join_column)
     clusters = cluster_mismatches(diff_result, confidence_threshold=confidence_threshold)
+    row_presence_clusters = detect_row_presence_patterns(
+        diff_result, source_df=source_df, target_df=target_df, confidence_threshold=confidence_threshold
+    )
 
     explanations: dict[str, ClusterExplanation] = {}
     all_redaction_categories: set[str] = set()
@@ -128,6 +133,7 @@ def _run_comparison(
         join_column=join_column,
         diff_result=diff_result,
         clusters=clusters,
+        row_presence_clusters=row_presence_clusters,
         explanations=explanations,
         redaction_categories=all_redaction_categories,
     )
@@ -206,11 +212,15 @@ def compare(
         )
 
     report = _render_report(
-        source, target, result.join_column, result.diff_result, result.clusters, result.explanations
+        source, target, result.join_column, result.diff_result, result.clusters, result.explanations,
+        row_presence_clusters=result.row_presence_clusters,
     )
     Path(output).write_text(report)
 
-    _print_summary(result.diff_result, result.clusters, output, result.explanations)
+    _print_summary(
+        result.diff_result, result.clusters, output, result.explanations,
+        row_presence_clusters=result.row_presence_clusters,
+    )
 
 
 @app.command(name="compare-dir")
@@ -316,20 +326,20 @@ def compare_dir(
         report = _render_report(
             str(source_file), str(target_file), result.join_column,
             result.diff_result, result.clusters, result.explanations,
+            row_presence_clusters=result.row_presence_clusters,
         )
         report_path = output_path / f"{source_file.stem}_report.md"
         report_path.write_text(report)
 
-        if not result.clusters:
+        total_findings = len(result.clusters) + len(result.row_presence_clusters)
+        if total_findings == 0:
             typer.secho(f"  [OK] {pair_label}: no mismatches", fg=typer.colors.GREEN)
         else:
-            pattern_summary = ", ".join(
-                p.pattern_id
-                for c in result.clusters
-                for p in c.candidate_patterns
-            ) or "unrecognized pattern(s)"
+            pattern_names = [p.pattern_id for c in result.clusters for p in c.candidate_patterns]
+            pattern_names += [p.pattern_id for c in result.row_presence_clusters for p in c.candidate_patterns]
+            pattern_summary = ", ".join(pattern_names) or "unrecognized pattern(s)"
             typer.secho(
-                f"  [DIFF] {pair_label}: {len(result.clusters)} column(s) affected ({pattern_summary})",
+                f"  [DIFF] {pair_label}: {total_findings} finding(s) ({pattern_summary})",
                 fg=typer.colors.CYAN,
             )
         succeeded += 1
@@ -419,8 +429,18 @@ def _apply_fuzzy_key_resolution(source_df, target_df, join_column):
     return source_df, target_df
 
 
-def _render_report(source_path, target_path, join_column, diff_result, clusters, explanations: dict[str, ClusterExplanation] | None = None) -> str:
+def _render_report(
+    source_path,
+    target_path,
+    join_column,
+    diff_result,
+    clusters,
+    explanations: dict[str, ClusterExplanation] | None = None,
+    row_presence_clusters: list | None = None,
+) -> str:
     explanations = explanations or {}
+    row_presence_clusters = row_presence_clusters or []
+    row_presence_by_side = {c.side: c for c in row_presence_clusters}
     lines = [
         "# wherefore comparison report",
         "",
@@ -453,6 +473,14 @@ def _render_report(source_path, target_path, join_column, diff_result, clusters,
     if diff_result.source_only_keys:
         lines.append(f"## Rows only in source ({len(diff_result.source_only_keys)})")
         lines.append("")
+        source_only_match = row_presence_by_side.get("source_only")
+        if source_only_match and not source_only_match.is_unrecognized:
+            for p in source_only_match.candidate_patterns:
+                lines.append(
+                    f"- Statistically matches **{p.pattern_id}** "
+                    f"(signature: `{p.signature_name}`, confidence: {p.confidence:.2f})"
+                )
+            lines.append("")
         for k in diff_result.source_only_keys[:20]:
             lines.append(f"- {k}")
         if len(diff_result.source_only_keys) > 20:
@@ -462,6 +490,14 @@ def _render_report(source_path, target_path, join_column, diff_result, clusters,
     if diff_result.target_only_keys:
         lines.append(f"## Rows only in target ({len(diff_result.target_only_keys)})")
         lines.append("")
+        target_only_match = row_presence_by_side.get("target_only")
+        if target_only_match and not target_only_match.is_unrecognized:
+            for p in target_only_match.candidate_patterns:
+                lines.append(
+                    f"- Statistically matches **{p.pattern_id}** "
+                    f"(signature: `{p.signature_name}`, confidence: {p.confidence:.2f})"
+                )
+            lines.append("")
         for k in diff_result.target_only_keys[:20]:
             lines.append(f"- {k}")
         if len(diff_result.target_only_keys) > 20:
@@ -513,17 +549,27 @@ def _render_report(source_path, target_path, join_column, diff_result, clusters,
     return "\n".join(lines)
 
 
-def _print_summary(diff_result, clusters, output_path, explanations: dict[str, ClusterExplanation] | None = None) -> None:
+def _print_summary(
+    diff_result,
+    clusters,
+    output_path,
+    explanations: dict[str, ClusterExplanation] | None = None,
+    row_presence_clusters: list | None = None,
+) -> None:
     explanations = explanations or {}
+    row_presence_by_side = {c.side: c for c in (row_presence_clusters or [])}
     typer.echo(
         f"Compared {diff_result.source_row_count} source rows against "
         f"{diff_result.target_row_count} target rows."
     )
     typer.echo(f"Matched rows: {diff_result.matched_row_count}")
+
     if diff_result.source_only_keys:
         typer.echo(f"Rows only in source: {len(diff_result.source_only_keys)}")
+        _print_row_presence_match(row_presence_by_side.get("source_only"))
     if diff_result.target_only_keys:
         typer.echo(f"Rows only in target: {len(diff_result.target_only_keys)}")
+        _print_row_presence_match(row_presence_by_side.get("target_only"))
 
     if not clusters:
         typer.secho("No column mismatches found.", fg=typer.colors.GREEN)
@@ -543,6 +589,16 @@ def _print_summary(diff_result, clusters, output_path, explanations: dict[str, C
             explanation = explanations.get(cluster.column)
             if explanation is not None:
                 typer.secho(f"    AI: {explanation.narrative}", fg=typer.colors.MAGENTA)
+
+
+def _print_row_presence_match(row_presence_cluster) -> None:
+    if row_presence_cluster is None or row_presence_cluster.is_unrecognized:
+        return
+    for match in row_presence_cluster.candidate_patterns:
+        typer.secho(
+            f"  matches '{match.pattern_id}' (confidence {match.confidence:.2f})",
+            fg=typer.colors.CYAN,
+        )
 
     typer.secho(f"\nFull report written to {output_path}", fg=typer.colors.GREEN)
 

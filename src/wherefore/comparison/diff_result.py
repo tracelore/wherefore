@@ -84,6 +84,26 @@ class ColumnSummary:
 
 
 @dataclass
+class RowPresenceRecord:
+    """
+    A full row present on only one side of the comparison -- the key
+    AND every non-key column's value, not just the key. Added
+    specifically to support dedup_failure and key_mismatch detection:
+    confirmed by direct testing that a row genuinely present only in
+    the target (e.g. a duplicate re-inserted with a new auto-generated
+    key during a migration retry) shows up ONLY as a key in
+    source_only_keys/target_only_keys -- there's no way to check
+    whether that row's CONTENT matches an existing row elsewhere
+    without the full row data, which the key-only fields don't carry.
+    `values` excludes the join key columns themselves (redundant with
+    `key`).
+    """
+
+    key: dict[str, Any]
+    values: dict[str, Any]
+
+
+@dataclass
 class DiffResult:
     """
     The canonical, normalized diff output. Everything downstream
@@ -98,12 +118,22 @@ class DiffResult:
     target_row_count: int
     matched_row_count: int
 
-    # Rows present in only one side, identified by their key value(s).
-    # Each entry is a dict mapping join column name -> value, e.g.
-    # {"account_id": "ACCT-100042"} or {"region": "us", "id": 7} for
-    # composite keys.
+    # Rows present in only one side, identified by their key value(s)
+    # ONLY -- kept for backward compatibility with existing callers
+    # that just need to know WHICH keys are unmatched, not their full
+    # content. Each entry is a dict mapping join column name -> value,
+    # e.g. {"account_id": "ACCT-100042"} or {"region": "us", "id": 7}
+    # for composite keys.
     source_only_keys: list[dict[str, Any]] = field(default_factory=list)
     target_only_keys: list[dict[str, Any]] = field(default_factory=list)
+
+    # The same unmatched rows as above, but with full row content --
+    # needed for dedup_failure/key_mismatch detection, which has to
+    # examine VALUES, not just keys, to tell "this is a genuine new
+    # record" apart from "this is a duplicate of an existing row under
+    # a different key." See RowPresenceRecord's docstring.
+    source_only_rows: list[RowPresenceRecord] = field(default_factory=list)
+    target_only_rows: list[RowPresenceRecord] = field(default_factory=list)
 
     column_summary: list[ColumnSummary] = field(default_factory=list)
     mismatches: list[MismatchRow] = field(default_factory=list)

@@ -744,3 +744,49 @@ finding (no "source_value -> target_value" pair exists for a row that's
 simply absent), and whether `dedup_failure`'s `confirmation_function`
 escape hatch operates on the row-presence data directly or needs its
 own dedicated check against the full DiffResult.
+
+## dedup_failure: built, using the row-presence extension above
+
+The clustering extension designed above is now real. `DiffResult` gained
+`source_only_rows`/`target_only_rows` (full row content, not just keys
+-- see `RowPresenceRecord`), and `detect_row_presence_patterns()` is a
+new, separate function alongside `cluster_mismatches()` -- deliberately
+NOT folded into it, so the widely-used `cluster_mismatches() ->
+list[Cluster]` signature stayed completely unchanged for every existing
+caller.
+
+The corruptor models the realistic case: a duplicate row gets a NEW
+auto-generated key, not the same key reused (which most diff tools,
+including datacompy, already catch trivially). Detection
+(`duplicate_content_fraction`) checks whether an unmatched row's full
+value content exactly matches some row already present in the other
+side's dataset -- confirmed correct on both the positive case (1.0
+confidence on a real fixture) and the negative case (correctly
+"unrecognized" on genuinely new rows, verified by using different
+generator seeds so the extra rows have different content, not just
+different keys).
+
+The originally-anticipated `confirmation_function` escape hatch turned
+out to be unnecessary -- `duplicate_content_fraction` is already a
+single, complete check (row presence + content verification combined),
+not a two-stage signature+confirmation design. Worth noting as a
+real example of a speculative design decision (made before the
+pattern existed) turning out differently once actually built.
+
+Wired into the CLI: both `_render_report` and `_print_summary` now
+show row-presence pattern matches directly alongside the existing
+"Rows only in source/target" sections, not as a separate disconnected
+block. `compare-dir`'s per-pair terminal summary was also fixed during
+this work -- it previously only checked `result.clusters` to decide
+[OK] vs [DIFF], which would have wrongly reported "no mismatches" for
+a pure dedup_failure case (zero column mismatches, only row-presence
+findings).
+
+Known, honestly-tracked gap: `dedup_failure` is NOT yet wired into the
+automated eval harness (`run_statistical_eval`/`run_llm_eval`), which
+currently only scores column-mismatch `Cluster` results. Verified by
+dedicated tests instead. Extending the harness to also score
+row-presence clusters is tracked as real future work, not silently
+assumed done.
+
+289 tests passing.

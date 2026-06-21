@@ -24,7 +24,7 @@ except ImportError as e:  # pragma: no cover
         "Install it with: pip install datacompy"
     ) from e
 
-from wherefore.comparison.diff_result import ColumnSummary, DiffResult, MismatchRow
+from wherefore.comparison.diff_result import ColumnSummary, DiffResult, MismatchRow, RowPresenceRecord
 
 
 def compare(
@@ -94,6 +94,8 @@ def compare(
         matched_row_count=len(dc.intersect_rows),
         source_only_keys=_extract_keys(dc.df1_unq_rows, join_columns),
         target_only_keys=_extract_keys(dc.df2_unq_rows, join_columns),
+        source_only_rows=_extract_rows(dc.df1_unq_rows, join_columns),
+        target_only_rows=_extract_rows(dc.df2_unq_rows, join_columns),
         column_summary=column_summary,
         mismatches=mismatches,
     )
@@ -105,11 +107,30 @@ def _extract_keys(unique_rows_df: pd.DataFrame, join_columns: list[str]) -> list
     DataFrames of rows present on only one side) into a list of plain
     key dicts, e.g. [{"account_id": "ACCT-100042"}], discarding the
     non-key columns -- callers needing the full row should re-look it
-    up from the original source/target DataFrame using this key.
+    up from the original source/target DataFrame using this key, or
+    use _extract_rows instead, which carries the full row directly.
     """
     if len(unique_rows_df) == 0:
         return []
     return unique_rows_df[join_columns].to_dict(orient="records")
+
+
+def _extract_rows(unique_rows_df: pd.DataFrame, join_columns: list[str]) -> list[RowPresenceRecord]:
+    """
+    Like _extract_keys, but keeps the full row (key + every other
+    column's value), needed for dedup_failure/key_mismatch detection
+    -- see RowPresenceRecord's docstring for why key-only isn't enough
+    for those patterns.
+    """
+    if len(unique_rows_df) == 0:
+        return []
+
+    records = []
+    for _, row in unique_rows_df.iterrows():
+        key = {jc: row[jc] for jc in join_columns}
+        values = {col: row[col] for col in unique_rows_df.columns if col not in join_columns}
+        records.append(RowPresenceRecord(key=key, values=values))
+    return records
 
 
 def _extract_mismatches(dc: "datacompy.PandasCompare", join_columns: list[str]) -> list[MismatchRow]:

@@ -411,3 +411,47 @@ def test_empty_cluster_returns_zero_for_mojibake_reversible():
 
 def test_signature_registry_contains_mojibake_reversible():
     assert "mojibake_reversible" in SIGNATURE_REGISTRY
+
+
+def test_duplicate_content_fraction_detects_real_duplicates():
+    from wherefore.clustering.signatures import duplicate_content_fraction
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    comparison_df = pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"], "val": [10, 20, 30]})
+    unmatched_rows = [
+        RowPresenceRecord(key={"id": 99}, values={"name": "a", "val": 10}),  # genuine duplicate of id=1's content
+    ]
+    confidence = duplicate_content_fraction(unmatched_rows, comparison_df, join_columns=["id"])
+    assert confidence == 1.0
+
+
+def test_duplicate_content_fraction_rejects_genuinely_new_rows():
+    from wherefore.clustering.signatures import duplicate_content_fraction
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    comparison_df = pd.DataFrame({"id": [1, 2, 3], "name": ["a", "b", "c"], "val": [10, 20, 30]})
+    unmatched_rows = [
+        RowPresenceRecord(key={"id": 99}, values={"name": "totally_new", "val": 999}),
+    ]
+    confidence = duplicate_content_fraction(unmatched_rows, comparison_df, join_columns=["id"])
+    assert confidence == 0.0
+
+
+def test_duplicate_content_fraction_handles_mixed_real_and_new_rows():
+    from wherefore.clustering.signatures import duplicate_content_fraction
+    from wherefore.comparison.diff_result import RowPresenceRecord
+
+    comparison_df = pd.DataFrame({"id": [1, 2], "name": ["a", "b"], "val": [10, 20]})
+    unmatched_rows = [
+        RowPresenceRecord(key={"id": 98}, values={"name": "a", "val": 10}),  # duplicate
+        RowPresenceRecord(key={"id": 99}, values={"name": "new", "val": 999}),  # genuinely new
+    ]
+    confidence = duplicate_content_fraction(unmatched_rows, comparison_df, join_columns=["id"])
+    assert confidence == 0.5
+
+
+def test_duplicate_content_fraction_returns_zero_for_empty_inputs():
+    from wherefore.clustering.signatures import duplicate_content_fraction
+
+    assert duplicate_content_fraction([], pd.DataFrame({"id": [1]}), ["id"]) == 0.0
+    assert duplicate_content_fraction([object()], None, ["id"]) == 0.0

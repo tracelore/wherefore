@@ -317,6 +317,49 @@ def mojibake_reversible(mismatches: list[MismatchRow]) -> float:
     return evidence_count / total_comparable
 
 
+def duplicate_content_fraction(unmatched_rows: list, comparison_df, join_columns: list[str]) -> float:
+    """
+    Confidence that unmatched rows (rows present on only one side of
+    the comparison) are explained by dedup_failure: for each unmatched
+    row, does its non-key VALUE CONTENT exactly match some row in
+    `comparison_df` (the OTHER side's full dataset, including matched
+    rows)? A row that's a genuine new/removed record won't match
+    anything; a row that's a duplicate re-inserted under a new
+    auto-generated key will match an existing row's content exactly.
+
+    Deliberately NOT in SIGNATURE_REGISTRY alongside the other
+    signature functions -- this function's shape genuinely differs
+    (it needs the full comparison DataFrame and join_columns, not just
+    a list[MismatchRow]), since row-presence patterns don't have a
+    column/dtype to dispatch on the way column-based mismatch patterns
+    do. Called directly from cluster_mismatches.py's
+    _detect_row_presence_candidates.
+
+    Returns 0.0 if unmatched_rows is empty or comparison_df is None.
+    """
+    if not unmatched_rows or comparison_df is None:
+        return 0.0
+
+    non_key_cols = [c for c in comparison_df.columns if c not in join_columns]
+    if not non_key_cols:
+        return 0.0
+
+    comparison_value_tuples = set(
+        tuple(row) for row in comparison_df[non_key_cols].itertuples(index=False)
+    )
+
+    duplicate_count = 0
+    for record in unmatched_rows:
+        try:
+            value_tuple = tuple(record.values.get(c) for c in non_key_cols)
+        except AttributeError:
+            continue
+        if value_tuple in comparison_value_tuples:
+            duplicate_count += 1
+
+    return duplicate_count / len(unmatched_rows)
+
+
 SIGNATURE_REGISTRY: dict[str, Callable[[list[MismatchRow]], float]] = {
     "constant_offset_subset": constant_offset_subset,
     "truncated_prefix": truncated_prefix,

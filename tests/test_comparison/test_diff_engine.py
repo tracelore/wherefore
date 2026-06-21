@@ -179,3 +179,53 @@ def test_string_join_column_normalized_to_list(financial_source):
     """compare() accepts a bare string for single-column joins."""
     result = compare(financial_source, financial_source.copy(), join_columns="account_id")
     assert result.join_columns == ["account_id"]
+
+
+def test_target_only_rows_carries_full_row_content_not_just_keys():
+    """
+    The real regression test for the dedup_failure architectural
+    extension: target_only_rows must carry every non-key column's
+    value, not just the key -- confirmed this is what's actually
+    needed to detect a row's content matches an existing row
+    elsewhere, which target_only_keys (key-only) cannot support.
+    """
+    source = pd.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"], "val": [10, 20]})
+    target = pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Carol"], "val": [10, 20, 30]})
+
+    result = compare(source, target, join_columns="id")
+    assert len(result.target_only_rows) == 1
+    record = result.target_only_rows[0]
+    assert record.key == {"id": 3}
+    assert record.values == {"name": "Carol", "val": 30}
+
+
+def test_source_only_rows_carries_full_row_content():
+    source = pd.DataFrame({"id": [1, 2, 3], "name": ["Alice", "Bob", "Carol"], "val": [10, 20, 30]})
+    target = pd.DataFrame({"id": [1, 2], "name": ["Alice", "Bob"], "val": [10, 20]})
+
+    result = compare(source, target, join_columns="id")
+    assert len(result.source_only_rows) == 1
+    record = result.source_only_rows[0]
+    assert record.key == {"id": 3}
+    assert record.values == {"name": "Carol", "val": 30}
+
+
+def test_no_unique_rows_produces_empty_row_lists(financial_source):
+    result = compare(financial_source, financial_source.copy(), join_columns="account_id")
+    assert result.source_only_rows == []
+    assert result.target_only_rows == []
+
+
+def test_target_only_rows_and_keys_stay_consistent():
+    """
+    The key-only and full-row fields must agree on WHICH rows are
+    unmatched -- they're two views of the same underlying data, not
+    independent computations that could drift apart.
+    """
+    source = pd.DataFrame({"id": [1, 2], "val": [10, 20]})
+    target = pd.DataFrame({"id": [1, 2, 3, 4], "val": [10, 20, 30, 40]})
+
+    result = compare(source, target, join_columns="id")
+    keys_from_key_field = {tuple(sorted(k.items())) for k in result.target_only_keys}
+    keys_from_row_field = {tuple(sorted(r.key.items())) for r in result.target_only_rows}
+    assert keys_from_key_field == keys_from_row_field

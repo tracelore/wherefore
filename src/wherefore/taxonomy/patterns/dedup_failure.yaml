@@ -1,0 +1,52 @@
+id: dedup_failure
+display_name: "Duplicate Row (Failed Deduplication)"
+category: structural
+
+description: >
+  A row was duplicated during migration -- typically because a
+  migration job was retried after a partial failure and re-inserted
+  records that had already been migrated, without deduplicating
+  against what was already present. The duplicate almost always gets
+  a NEW auto-generated key (the common case for systems that assign
+  keys on insert), so it doesn't show up as a simple "same key twice"
+  -- its content is identical to an existing row, but its key is new.
+
+detection_hints:
+  - applies_to_dtypes: []
+    signature: "duplicate_content_fraction"
+    description: >
+      This pattern's signal does NOT appear in column-level mismatches
+      at all -- confirmed by direct testing that a duplicated row with
+      a new key produces ZERO mismatches in the normal sense. It shows
+      up entirely as an extra row (target_only_rows). Detection checks
+      whether an unmatched row's full VALUE CONTENT (every non-key
+      column) exactly matches some row already present in the other
+      side's dataset, including matched rows -- not just other
+      unmatched rows. Because this pattern has no column/dtype to
+      dispatch on, it is detected via a separate code path
+      (clustering.cluster_mismatches.detect_row_presence_patterns),
+      not the column-based dtype dispatch every other pattern uses.
+
+llm_context: >
+  If the duplicated rows' keys share an obvious pattern (e.g. all
+  inserted at the end of the file, or all within a narrow ID range),
+  that's consistent with a single batch retry. If the new keys are
+  scattered or vary in format from the rest of the dataset, consider
+  whether multiple migration attempts or parallel write paths could
+  have each re-inserted a subset independently.
+
+synthetic_corruption:
+  generator: "wherefore.synthetic.corruptors.dedup_failure:apply"
+  params_schema:
+    affected_fraction:
+      type: float
+      default: 0.15
+      description: "Fraction of rows to duplicate with a new key"
+    new_key_prefix:
+      type: str
+      default: "DUPE"
+      description: "Prefix used to generate new keys for duplicated rows"
+
+severity_default: high
+references:
+  - "https://en.wikipedia.org/wiki/Data_deduplication"

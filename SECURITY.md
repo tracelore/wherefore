@@ -6,7 +6,7 @@ If you find a security vulnerability in `wherefore`, please report it
 privately rather than opening a public issue — this gives time to fix
 it before details are public.
 
-**How to report:** open a [GitHub Security Advisory](https://github.com/ArunMishra1/wherefore/security/advisories/new)
+**How to report:** open a [GitHub Security Advisory](https://github.com/tracelore/wherefore/security/advisories/new)
 for this repository (preferred), or contact the maintainer directly via
 GitHub.
 

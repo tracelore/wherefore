@@ -2,7 +2,7 @@
 
 **Tells you *why* two datasets differ — not just that they do.**
 
-[![CI](https://github.com/ArunMishra1/wherefore/actions/workflows/ci.yml/badge.svg)](https://github.com/ArunMishra1/wherefore/actions/workflows/ci.yml)
+[![CI](https://github.com/tracelore/wherefore/actions/workflows/ci.yml/badge.svg)](https://github.com/tracelore/wherefore/actions/workflows/ci.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.apache.org/licenses/LICENSE-2.0)
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://www.python.org/)
 
@@ -53,13 +53,13 @@ files in two minutes: see [Quickstart](#quickstart).
 ## Quickstart
 
 ```bash
-git clone https://github.com/ArunMishra1/wherefore.git
+git clone https://github.com/tracelore/wherefore.git
 cd wherefore
 ./dev_setup.sh
 ```
 
 This creates a `.venv/`, installs everything, and runs the test suite
-(should show **266 passed**, no API key needed — the test suite uses a
+(should show **289 passed**, no API key needed — the test suite uses a
 fake AI provider, zero network calls). Safe to re-run.
 
 Then, on any two files of yours:
@@ -73,6 +73,25 @@ mix and match freely, format is auto-detected per file. No key column
 needed; `wherefore` finds one. If it picks wrong, or you have many
 table pairs to check at once (a real migration is dozens of tables,
 not one), see [usage details](#usage) below.
+
+**Don't have a Parquet or Excel file handy?** Make one from the CSVs
+above in two lines, run inside the same activated `.venv` from
+`dev_setup.sh` (so `pandas`/`pyarrow` are already available) — note
+`parse_dates=[...]` on any datetime column, since Parquet and Excel
+store dates natively and pandas needs to know which column is one
+before writing (without it, the column round-trips as plain text and
+date-based patterns like `timezone_shift` won't be detected —
+confirmed by testing this exact gap):
+
+```bash
+python3 -c "
+import pandas as pd
+df = pd.read_csv('old_export.csv', parse_dates=['hire_date'])  # name your actual date column
+df.to_parquet('old_export.parquet', index=False)
+df.to_excel('old_export.xlsx', index=False)
+"
+wherefore compare old_export.parquet new_export.parquet   # or .xlsx
+```
 
 Want the AI explanation, not just the statistical match?
 
@@ -133,14 +152,23 @@ statistical detection, AI explanation, and a scored eval harness.
 |---|---|
 | **Formats** | CSV, JSON, Parquet, Excel — local or `s3://`, auto-detected, mix-and-match |
 | **Modes** | One file pair (`compare`) or a whole directory (`compare-dir`) |
-| **Taxonomy** | 6 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`, `encoding_mismatch` |
-| **AI layer** | Verified against the real Claude API twice — manually and via the scored eval harness — 100% match on a small (six-fixture) sample |
+| **Taxonomy** | 7 failure patterns built & tested: `timezone_shift`, `truncation`, `enum_drift`, `null_type_coercion`, `float_precision`, `encoding_mismatch`, `dedup_failure` |
+| **AI layer** | Verified against the real Claude API twice — manually and via the scored eval harness — 100% match on a small (seven-fixture) sample |
 | **Privacy** | Redacts emails/SSNs/cards/phones before any `--explain` call, on by default |
-| **Tests** | 266 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
+| **Tests** | 289 passing, including a real (mocked) S3 round-trip and end-to-end runs against real generated files |
 
-**Not built yet:** more fixture coverage at scale, two patterns needing
-clustering extensions (`key_mismatch`, `dedup_failure` -- both detect
-via missing/extra rows, not column mismatches), and database connectivity
+`dedup_failure` is structurally different from the other six — it
+detects duplicated rows (re-inserted with a new key, not the same key
+twice), which shows up as extra rows rather than a column-level
+mismatch. It has its own clustering path
+(`detect_row_presence_patterns`) and is verified by real, dedicated
+tests, but isn't yet wired into the automated eval harness above (that
+harness currently only scores column-mismatch patterns) — tracked
+honestly as a gap, not hidden.
+
+**Not built yet:** `key_mismatch` (the other row-presence pattern —
+unresolved key-formatting drift), wiring `dedup_failure` into the eval
+harness, more fixture coverage at scale, and database connectivity
 (Postgres, MySQL,
 SQLite). File-based sources — local and `s3://` — and CSV/JSON/Parquet/
 Excel are all supported today. Live queue: [`TAXONOMY_TODO.md`](./TAXONOMY_TODO.md).
@@ -283,8 +311,8 @@ IAM role, `AWS_PROFILE`) — `wherefore` doesn't invent its own.
 $ wherefore compare-dir old_exports new_exports --output-dir reports
 Found 3 matching file pair(s). Comparing...
 
-  [DIFF] accounts.csv: 1 column(s) affected (timezone_shift)
-  [DIFF] patients.csv: 1 column(s) affected (truncation)
+  [DIFF] accounts.csv: 1 finding(s) (timezone_shift)
+  [DIFF] patients.csv: 1 finding(s) (truncation)
   [OK] transactions.csv: no mismatches
 
 Done: 3 compared, 0 skipped. Reports written to reports/
