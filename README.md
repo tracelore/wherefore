@@ -18,7 +18,7 @@ AI narrative (`--explain`) talks to an external API, and that's off by
 default.
 
 ```bash
-pip install -e .
+pip install wherefore
 wherefore compare old_export.csv new_export.csv
 ```
 
@@ -52,6 +52,34 @@ files in two minutes: see [Quickstart](#quickstart).
 
 ## Quickstart
 
+**Install it:**
+
+```bash
+pip install wherefore
+```
+
+Or via Homebrew, if you'd rather not think about Python at all:
+
+```bash
+brew tap tracelore/wherefore
+brew install wherefore
+```
+
+(Homebrew installs a prebuilt bottle on Apple Silicon Macs running a
+matching macOS version — no compiling, just a normal install. On other
+platforms it builds from source, which works but takes a few minutes
+the first time.)
+
+**Run it on your own files:**
+
+```bash
+wherefore compare old_export.csv new_export.csv --output report.md
+```
+
+**Want to work on `wherefore` itself instead?** Clone it and use the
+dev setup script, which also runs the full test suite so you know your
+environment is good before you start:
+
 ```bash
 git clone https://github.com/tracelore/wherefore.git
 cd wherefore
@@ -61,12 +89,6 @@ cd wherefore
 This creates a `.venv/`, installs everything, and runs the test suite
 (should show **316 passed**, no API key needed — the test suite uses a
 fake AI provider, zero network calls). Safe to re-run.
-
-Then, on any two files of yours:
-
-```bash
-wherefore compare old_export.csv new_export.csv --output report.md
-```
 
 Works the same with `.csv`, `.json`, `.parquet`, or `.xlsx`/`.xls` —
 mix and match freely, format is auto-detected per file. No key column
