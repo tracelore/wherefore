@@ -35,14 +35,20 @@ are built one at a time (corruptor-then-YAML, not YAML-first).
 compound logic in YAML.** A YAML-embedded boolean-logic DSL for
 combining signatures is exactly the kind of complexity that turns
 "add a pattern" into "learn our query language." Patterns needing a
-second confirming signal (e.g. `dedup_failure` needing both a
-row-count delta AND a duplicate-key check) declare one primary
-signature in YAML for cheap candidate filtering, and implement a
-`confirmation_function` — plain Python, no schema — for the second
-gate. See `taxonomy/schema.py` module docstring. If we pass roughly
-12-15 patterns and find ourselves writing confirmation functions for
-most of them, that's the signal to revisit this and design a real
-multi-signature schema instead of guessing now.
+second confirming signal would declare one primary signature in YAML
+for cheap candidate filtering and implement a `confirmation_function`
+— plain Python, no schema — for the second gate. In practice, no
+pattern built so far has needed this: `dedup_failure` was originally
+expected to (a row-count delta signal plus a duplicate-key
+confirmation), but the real implementation turned out to need only one
+direct check (`duplicate_content_fraction`, comparing an unmatched
+row's full content against the other side's dataset) — a good example
+of a speculative design decision turning out differently once actually
+built. See `taxonomy/schema.py` module docstring for the mechanism,
+still available if a future pattern genuinely needs it. If we pass
+roughly 12-15 patterns and find ourselves writing confirmation
+functions for most of them, that's the signal to revisit this and
+design a real multi-signature schema instead of guessing now.
 
 **Why eval fixtures are committed to git, not generated on demand.**
 The project's headline claims (e.g. "X% accuracy on Y corruption

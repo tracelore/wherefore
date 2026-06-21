@@ -1,4 +1,33 @@
-# Taxonomy build tracker
+# Taxonomy build log
+
+**This is a deep-dive history, not a reference doc.** It records real
+bugs found, design decisions made (and sometimes reversed), and why
+things are built the way they are — written chronologically as the
+project was built. If you want to know what `wherefore` can currently
+detect or how to add a pattern, start with [`TAXONOMY.md`](./TAXONOMY.md)
+instead; come back here for the "why" behind any specific decision.
+
+### Contents
+
+- [Reasoning layer](#reasoning-layer-reasoningexplainpy-reasoningproviders)
+- [Eval harness](#eval-harness-evalsfixtures-evalsharness)
+- [Future, deliberately deferred](#future-deliberately-deferred-not-now)
+- [Why patterns are built one at a time](#why-patterns-are-built-one-at-a-time-not-all-yaml-first)
+- [Remaining patterns / build order](#remaining-patterns-build-in-this-order-easiest-signature-first)
+- [Order rationale](#order-rationale)
+- [null_type_coercion: three real bugs](#null_type_coercion-three-real-bugs-found-building-one-pattern)
+- [float_precision: a signature-design lesson](#float_precision-a-signature-design-lesson)
+- [First real --llm eval run](#first-real---llm-eval-run-against-the-actual-anthropic-api)
+- [Multi-source format support (Parquet, Excel)](#multi-source-format-support-parquet-and-excel)
+- [Multi-source roadmap](#multi-source-roadmap-whats-next)
+- [Redaction layer](#redaction-layer-data-safety-before-any-new-connector)
+- [Batch mode (compare-dir)](#batch-mode-compare-dir)
+- [S3 support](#s3-support)
+- [encoding_mismatch: the 6th pattern](#encoding_mismatch-the-6th-pattern)
+- [Clustering extension for row-presence patterns](#clustering-extension-for-row-presence-patterns-key_mismatch-dedup_failure)
+- [dedup_failure: built](#dedup_failure-built-using-the-row-presence-extension-above)
+
+---
 
 `timezone_shift` is fully implemented end-to-end: schema + YAML +
 corruptor (`synthetic/corruptors/timezone_shift.py`), proven against
