@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="./assets/logo.png" alt="wherefore logo" width="280">
+</p>
+
 # wherefore
 
 **Tells you *why* two datasets differ — not just that they do.**
