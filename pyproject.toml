@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wherefore"
-version = "0.3.0"
+version = "0.3.1"
 description = "Explains WHY two datasets differ, in plain English, with eval-backed accuracy claims."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -26,11 +26,35 @@ classifiers = [
 ]
 
 dependencies = [
-    "pandas>=2.2",  # 2.0 floor previously caused a real CI failure: datetime
+    "pandas>=2.2,<3.0",  # 2.0 floor previously caused a real CI failure: datetime
                      # resolution inference (unit="s" -> [s] vs [ns]) drifted
                      # between pandas versions. The actual fix is an explicit
                      # .astype("datetime64[s]") in base_dataset.py -- this
                      # tighter floor is just an extra layer, not the real fix.
+                     #
+                     # NEW CEILING (0.3.1): pandas 3.0.3 segfaults -- not
+                     # raises, a real SIGSEGV -- inside pd.to_datetime(...,
+                     # errors="coerce", format="ISO8601") when called on a
+                     # plain non-date string column (e.g. a "status" column
+                     # with values like "active"/"inactive"), which is
+                     # exactly what loaders.py:_try_parse_datetime_columns
+                     # calls on every object-dtype column to detect real
+                     # datetime columns. Confirmed by direct, minimal,
+                     # wherefore-free reproduction (3 lines: pd.Series(["a",
+                     # "b"]) into that exact call) on Apple Silicon, Python
+                     # 3.13, pandas 3.0.3, numpy 2.4.6 -- not a guess, not
+                     # specific to this codebase. Confirmed FIXED by the
+                     # same minimal reproduction under pandas==2.2.3 (exit
+                     # 0, correct [NaT, NaT] result). pandas 3.0's release
+                     # notes describe a full rewrite of datetime-resolution
+                     # inference in to_datetime() -- the kind of recently-
+                     # rewritten native code most likely to carry an
+                     # undiscovered bug, consistent with what broke here.
+                     # Ceiling kept at <3.0 rather than pinning an exact
+                     # version, so a future pandas 3.0.x patch release (or
+                     # 3.1+) that actually fixes this can be adopted without
+                     # another emergency release -- revisit this ceiling
+                     # once a pandas changelog confirms the fix.
     "numpy>=1.24",
     "datacompy>=1.0",  # diff_engine.py is built against the PandasCompare API (1.0+); pre-1.0 used a different `Compare` class with a different attribute surface
     "pydantic>=2.0",
