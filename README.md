@@ -39,13 +39,19 @@ Full report written to report.md
 That's a real run, real output — not a mockup. Try it on your own
 files in two minutes: see [Quickstart](#quickstart).
 
+**New here and want the conceptual story before the code?**
+[`DESIGN.md`](./DESIGN.md) walks through what `wherefore` actually
+does and why it's built this way — no need to read source first.
+
 ---
 
 ### Contents
 
 [Quickstart](#quickstart) · [Why this exists](#why-this-exists) ·
 [What's built](#whats-built) · [Architecture](#architecture) ·
+[Design — the full story](https://github.com/tracelore/wherefore/blob/main/DESIGN.md) ·
 [Evals](#evals--why-trust-the-explanations) · [All flags](#all-flags) ·
+[Performance & scale](#performance--scale) ·
 [Troubleshooting](https://github.com/tracelore/wherefore/blob/main/troubleshooting.md) ·
 [Contributing](#contributing)
 
@@ -532,27 +538,23 @@ wherefore compare-dir SOURCE_DIR TARGET_DIR [OPTIONS]
 
 ## Performance & scale
 
-`wherefore` has been pressure-tested with synthetic CSV/Parquet/XLSX
-file pairs from 10,000 up to 1,000,000 rows to see how load time,
-comparison time, and memory use actually scale -- not just whether the
-tool works on small example files. Headline findings so far:
+Pressure-tested with synthetic CSV/Parquet/XLSX file pairs from 10,000
+to 1,000,000 rows. Headline findings:
 
-- **CSV and Parquet both scale cleanly** through 1,000,000 rows with
-  no crash, OOM, or correctness regression. Parquet is consistently
-  faster, and the gap widens at larger sizes.
-- **XLSX is fine for human-scale spreadsheets, not large comparisons**
-  -- write/read time is dominated by the `openpyxl` library itself
-  (by its own documentation, CPU-intensive and ~50x file size in
-  memory when reading), not by anything in `wherefore`. Prefer CSV or
-  Parquet for large comparisons.
-- **A real optimization opportunity was found, not yet fixed**: the
-  datetime-detection heuristic that runs on every string column during
-  load currently costs almost as much as parsing the file itself, even
-  on columns that obviously aren't dates.
+- **CSV and Parquet scale cleanly** through 1,000,000 rows — no
+  crash, no OOM, no correctness issues. Parquet is consistently
+  faster, and the gap widens at scale.
+- **XLSX works at human scale, not large-comparison scale** — the cost
+  is `openpyxl` itself (CPU-intensive by design, ~50x file size in
+  memory when reading), not `wherefore`. Prefer CSV or Parquet for
+  large comparisons.
+- **A real optimization opportunity, not yet fixed**: the
+  datetime-detection heuristic on every string column costs almost as
+  much as parsing the file itself — even on columns that obviously
+  aren't dates.
 
-Full methodology, hardware specs, and the actual numbers (updated as
-more scenarios -- S3, database sources, larger/messier data -- are
-tested) live in [`PERFORMANCE.md`](PERFORMANCE.md).
+Full methodology, hardware specs, and live numbers:
+[`PERFORMANCE.md`](PERFORMANCE.md).
 
 ## Troubleshooting
 

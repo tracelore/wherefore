@@ -1,5 +1,15 @@
 # Security Policy
 
+### Contents
+
+[Reporting a vulnerability](#reporting-a-vulnerability) ·
+[What counts as a security concern](#what-counts-as-a-security-concern-here) ·
+[Data sent to the Claude API](#data-sent-to-the-claude-api) ·
+[Response expectations](#response-expectations) ·
+[Supported versions](#supported-versions)
+
+---
+
 ## Reporting a vulnerability
 
 If you find a security vulnerability in `wherefore`, please report it
