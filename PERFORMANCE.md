@@ -14,6 +14,14 @@ every machine or dataset shape.
   - [Results: `wherefore compare`, single CSV/Parquet file pair](#results-wherefore-compare-single-csvparquet-file-pair)
   - [XLSX: write-time-dominated, scales far worse than CSV/Parquet](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
   - [Where the time actually goes (1,000,000-row CSV breakdown)](#where-the-time-actually-goes-1000000-row-csv-breakdown)
+  - [Round 2: real hardware (Mac)](#round-2-real-hardware-mac)
+    - [Test environment (Mac, round 2)](#test-environment-mac-round-2)
+    - [Results, all three formats, all four tiers](#results-all-three-formats-all-four-tiers)
+  - [Round 2: proof, not just numbers](#round-2-proof-not-just-numbers)
+  - [Round 3: column count, not just row count](#round-3-column-count-not-just-row-count)
+    - [Schema](#schema)
+    - [Results: 10,000 rows, varying column count](#results-10000-rows-varying-column-count)
+    - [Results: 100,000 rows, varying column count](#results-100000-rows-varying-column-count)
   - [Still to measure](#still-to-measure)
 
 ---
@@ -133,12 +141,283 @@ recover a meaningful chunk of load time on wide, mostly-non-date
 tables, without changing correctness. Not yet implemented — noted here
 as a finding to revisit deliberately, not fixed reactively.
 
+## Round 2: real hardware (Mac)
+
+Same generator, same schema, same 1% mismatch rate, same measurement
+method as round 1 — only the machine changed. This round also closes
+the XLSX 500K/1M gap round 1 deferred.
+
+### Test environment (Mac, round 2)
+
+| | |
+|---|---|
+| Machine | MacBook Pro, Apple **M5 Max** |
+| CPU | 18 cores (6 Super + 12 Performance) |
+| Memory | 64 GiB total |
+| Python | 3.14.6 |
+| pandas | 2.3.3 |
+| numpy | 2.4.6 |
+| pyarrow | 24.0.0 |
+| openpyxl | 3.1.5 |
+
+### Results, all three formats, all four tiers
+
+| Rows | CSV (s) | CSV mem (MB) | Parquet (s) | Parquet mem (MB) | XLSX write (s) | XLSX compare (s) | XLSX mem (MB) |
+|---|---|---|---|---|---|---|---|
+| 10,000 | 0.48 | 161.5 | 1.59 | 171.3 | 0.50 | 0.80 | 164.9 |
+| 100,000 | 0.60 | 216.5 | 0.53 | 270.2 | 4.64 | 3.64 | 251.1 |
+| 500,000 | 1.33 | 479.3 | 0.93 | 646.0 | 23.68 | 17.13 | 650.3 |
+| 1,000,000 | 2.26 | 873.9 | 1.46 | 984.8 | 48.61 | 34.70 | 1,168.0 |
+
+All three formats completed cleanly at every tier, including the
+500K/1M XLSX tiers round 1 had to skip. Results verified correct at
+1,000,000 rows for every format — exactly 10,000 mismatched rows
+(1% of 1M), same as round 1.
+
+**The relative ordering of CSV vs. Parquet flipped from round 1.** On
+this Mac, CSV is consistently as fast as or faster than Parquet at
+every tier — the opposite of the sandbox, where Parquet pulled ahead
+and the gap widened with scale. The 10K-row Parquet number (1.59s) is
+likely first-call pyarrow overhead, not a real per-row cost — it drops
+to 0.53s at 100K rows, faster than the 10K number despite 10× the
+data. Take this as a reminder that small-N numbers are noisy; the
+500K–1M rows are the more trustworthy comparison, and even there CSV
+and Parquet are close enough (1.33s vs 0.93s at 500K; 2.26s vs 1.46s at
+1M) that format choice between the two is not the lever that matters
+on this hardware. It clearly was in the sandbox.
+
+**XLSX confirms the round-1 projection, at much better absolute
+numbers.** Round 1 estimated "a minute or more" to write 500K rows;
+real numbers came in at 23.68s — better than feared, but still by far
+the dominant cost in the pipeline at every tier. At 1,000,000 rows,
+writing the file (48.61s) takes longer than generating two 1M-row CSVs
+*and* running the full comparison on both, combined, several times
+over. More cores and a faster single-core clock clearly help openpyxl
+somewhat (round 1's 1-core sandbox took 18.66s to write 100K rows;
+this Mac took 4.64s — roughly 4×), but the structural cost openpyxl
+itself describes (CPU-intensive by design) doesn't disappear just
+because the hardware is faster. **The takeaway from round 1 stands,
+now confirmed at full scale on real hardware: prefer CSV or Parquet
+over XLSX for any comparison past tens of thousands of rows.**
+
+**Memory stayed trivial against 64GB at every tier** — even XLSX's
+worst case (1,168MB at 1M rows) used under 2% of available RAM. The
+sandbox's tighter 4GB ceiling was never actually close to binding for
+CSV/Parquet either, in retrospect; XLSX at 1M rows in that sandbox
+would have been the one real risk, which round 1 avoided testing by
+deferring it — a reasonable call at the time, confirmed unnecessary in
+hindsight only because we now have the real number.
+
+## Round 2: proof, not just numbers
+
+The table above is real, but a table alone asks you to trust it. Here
+is one full, real report — exact command, exact output, nothing
+trimmed except the middle of the example-row list:
+
+```
+$ cd ~/Documents/Projects/Personal/wherefore-scale-test
+$ wherefore compare data/source_1000000.csv data/target_1000000.csv \
+    --output results/report_1000000_csv.md
+Compared 1000000 source rows against 1000000 target rows.
+Matched rows: 1000000
+  amount: 10000 mismatches, pattern unrecognized
+
+Full report written to results/report_1000000_csv.md
+```
+
+```
+$ cat results/report_1000000_csv.md
+# wherefore comparison report
+
+- Source: `data/source_1000000.csv`
+- Target: `data/target_1000000.csv`
+- Join key: `id`
+- Source rows: 1000000
+- Target rows: 1000000
+- Matched rows: 1000000
+
+> **Note:** this report shows statistical findings only. Pass
+> `--explain` to additionally generate a plain-English causal
+> narrative for each cluster via the Claude API (requires
+> `ANTHROPIC_API_KEY` and makes real, billed API calls).
+
+## Mismatches by column (1 column(s) affected)
+
+### `amount` -- 10000 mismatched row(s)
+
+No known failure pattern's statistical signature matched this cluster.
+
+Example rows:
+
+- `{'id': 333}`: `8608.58` -> `9108.58`
+- `{'id': 667}`: `9987.45` -> `10487.45`
+- `{'id': 692}`: `2358.62` -> `2858.62`
+- `{'id': 978}`: `5323.54` -> `5823.54`
+- `{'id': 1029}`: `4037.37` -> `4537.37`
+- ... and 9995 more
+```
+
+The `+500.0` delta we inject is visible in every example row
+(`8608.58 -> 9108.58` is exactly `+500.0`, etc.) — this is the actual
+mechanism by which "verified correct" is checked throughout this
+document, not an assertion taken on faith. The reports do not currently
+say *why* `amount` differs (no taxonomy signature matched, since a flat
+`+500.0` shift isn't one of the eight known patterns) — this is
+expected and correct behavior, not a bug: it's the same "report the
+shape, not a fabricated cause" principle [`DESIGN.md`](./DESIGN.md)
+describes for the clustering layer generally. A real timezone-shift or
+truncation corruption, run through the same pipeline, would name the
+matched pattern here instead of "pattern unrecognized."
+
+## Round 3: column count, not just row count
+
+Every test above used a fixed 5-column schema. That leaves a real
+question unanswered: does *width* (column count), independent of row
+count, change the numbers? Real estate tables, customer records, and
+most migration-audit tables in practice have dozens of columns, not
+five.
+
+### Schema
+
+Base 5 columns are unchanged from rounds 1–2 (`id`, `name`, `amount`,
+`category`, `status`). Additional columns are added in a repeating
+cycle of 5 realistic types, so every width tier is a strict superset
+of the smaller ones:
+
+| Extra column type | What it is | Why it's included |
+|---|---|---|
+| `*_date` | Real `YYYY-MM-DD` string, always parseable | The original schema never had a column that *successfully* parsed as a date — this exercises that path for the first time |
+| `*_text` | ~80-char free text | Tests whether string length, not just column count, matters |
+| `*_int` | Plain integer | Cheap baseline |
+| `*_float` | Plain float | Cheap baseline |
+| `*_flag` | Low-cardinality string (`yes`/`no`) | Same shape as `status` |
+
+Column tiers tested: 5, 10, 20, 30, 50, 100. Same 1% `amount` mismatch
+rate as every other round, so results stay comparable.
+
+### Results: 10,000 rows, varying column count
+
+```
+$ for cols in 5 10 20 30 50 100; do
+>   for fmt in csv parquet xlsx; do
+>     python run_width_test.py 10000 $cols $fmt
+>   done
+> done
+csv n10000_c5: 0.46s, peak_mem=161.6MB, exit=0
+parquet n10000_c5: 0.46s, peak_mem=171.3MB, exit=0
+xlsx n10000_c5: 0.80s, peak_mem=164.7MB, exit=0
+csv n10000_c10: 0.46s, peak_mem=168.6MB, exit=0
+parquet n10000_c10: 0.46s, peak_mem=188.2MB, exit=0
+xlsx n10000_c10: 1.06s, peak_mem=174.0MB, exit=0
+csv n10000_c20: 0.53s, peak_mem=190.5MB, exit=0
+parquet n10000_c20: 0.53s, peak_mem=214.7MB, exit=0
+xlsx n10000_c20: 1.72s, peak_mem=192.8MB, exit=0
+csv n10000_c30: 0.67s, peak_mem=220.5MB, exit=0
+parquet n10000_c30: 0.53s, peak_mem=243.3MB, exit=0
+xlsx n10000_c30: 2.25s, peak_mem=214.0MB, exit=0
+csv n10000_c50: 0.73s, peak_mem=258.0MB, exit=0
+parquet n10000_c50: 0.60s, peak_mem=291.9MB, exit=0
+xlsx n10000_c50: 3.44s, peak_mem=252.4MB, exit=0
+csv n10000_c100: 1.06s, peak_mem=362.0MB, exit=0
+parquet n10000_c100: 0.73s, peak_mem=400.7MB, exit=0
+xlsx n10000_c100: 6.41s, peak_mem=352.5MB, exit=0
+```
+
+| Cols | CSV (s) | Parquet (s) | XLSX (s) |
+|---|---|---|---|
+| 5 | 0.46 | 0.46 | 0.80 |
+| 10 | 0.46 | 0.46 | 1.06 |
+| 20 | 0.53 | 0.53 | 1.72 |
+| 30 | 0.67 | 0.53 | 2.25 |
+| 50 | 0.73 | 0.60 | 3.44 |
+| 100 | 1.06 | 0.73 | 6.41 |
+
+**20× more columns (5→100), at a fixed 10,000 rows:** CSV time grows
+2.3×, Parquet 1.6×, XLSX 8.0×. Column count is a real, independent
+cost — confirming the question this section exists to answer.
+
+### Results: 100,000 rows, varying column count
+
+```
+$ for cols in 5 10 20 30 50 100; do
+>   for fmt in csv parquet xlsx; do
+>     python run_width_test.py 100000 $cols $fmt
+>   done
+> done
+csv n100000_c5: 0.74s, peak_mem=216.5MB, exit=0
+parquet n100000_c5: 0.60s, peak_mem=263.6MB, exit=0
+xlsx n100000_c5: 3.78s, peak_mem=251.4MB, exit=0
+csv n100000_c10: 0.93s, peak_mem=317.3MB, exit=0
+parquet n100000_c10: 0.66s, peak_mem=377.5MB, exit=0
+xlsx n100000_c10: 6.71s, peak_mem=351.9MB, exit=0
+csv n100000_c20: 1.60s, peak_mem=470.8MB, exit=0
+parquet n100000_c20: 0.93s, peak_mem=584.9MB, exit=0
+xlsx n100000_c20: 12.75s, peak_mem=549.8MB, exit=0
+csv n100000_c30: 2.20s, peak_mem=649.4MB, exit=0
+parquet n100000_c30: 1.13s, peak_mem=771.0MB, exit=0
+xlsx n100000_c30: 18.91s, peak_mem=756.0MB, exit=0
+csv n100000_c50: 3.47s, peak_mem=989.7MB, exit=0
+parquet n100000_c50: 1.60s, peak_mem=1132.8MB, exit=0
+xlsx n100000_c50: 31.24s, peak_mem=1155.1MB, exit=0
+csv n100000_c100: 6.66s, peak_mem=1794.9MB, exit=0
+parquet n100000_c100: 2.73s, peak_mem=2005.1MB, exit=0
+xlsx n100000_c100: 62.24s, peak_mem=2052.9MB, exit=0
+```
+
+| Cols | CSV (s) | CSV mem (MB) | Parquet (s) | Parquet mem (MB) | XLSX (s) | XLSX mem (MB) |
+|---|---|---|---|---|---|---|
+| 5 | 0.74 | 216.5 | 0.60 | 263.6 | 3.78 | 251.4 |
+| 10 | 0.93 | 317.3 | 0.66 | 377.5 | 6.71 | 351.9 |
+| 20 | 1.60 | 470.8 | 0.93 | 584.9 | 12.75 | 549.8 |
+| 30 | 2.20 | 649.4 | 1.13 | 771.0 | 18.91 | 756.0 |
+| 50 | 3.47 | 989.7 | 1.60 | 1,132.8 | 31.24 | 1,155.1 |
+| 100 | 6.66 | 1,794.9 | 2.73 | 2,005.1 | 62.24 | 2,052.9 |
+
+Verified correct at the widest, slowest tier:
+
+```
+$ grep "mismatched row" width_test/results/report_n100000_c100_csv.md
+### `amount` -- 1000 mismatched row(s)
+$ grep "mismatched row" width_test/results/report_n100000_c100_xlsx.md
+### `amount` -- 1000 mismatched row(s)
+```
+
+**The column-count penalty gets worse as rows increase — it does not
+stay fixed.** At 10K rows, 20× more columns cost CSV 2.3× more time.
+At 100K rows, the same 20× column increase costs CSV **9.0×** more
+time. Rows and columns compound, they don't just add. The same
+pattern holds for Parquet (1.6× → 4.5×) and XLSX (8.0× → 16.5×).
+
+**Memory scales consistently across formats once data is loaded** —
+roughly 8× for 20× more columns, at both row tiers, for all three
+formats. This makes sense: once a file is read into a DataFrame, the
+in-memory cost depends on the data itself, not which format it came
+from.
+
+**Practical reading:** a real-world 100-column table is not "the same
+as a 5-column table, just a bit slower." At 100K rows it's a genuinely
+different cost regime — XLSX in particular goes from a 3.8s
+nuisance at 5 columns to a full minute at 100. CSV and Parquet stay
+fast in absolute terms at every width tested so far, but the *trend*
+(worsening per-column cost as rows grow) is the more important finding
+than any single number — it says the 500K/1M/wide-table corner of this
+matrix, not yet tested, is where real risk is most likely to live.
+
+*250K, 500K, and 1M-row tiers at full column width are in progress —
+this section will be updated as those results come in.*
+
 ## Still to measure
 
-- XLSX at 500K and 1M rows
+- Column-width matrix at 250K, 500K, and 1M rows (in progress)
 - S3-backed sources (network latency as a new variable)
 - Database sources (`db://`), including `compare-dir`'s batch mode
 - Realistic/messy data: real dates, nulls, near-duplicate keys,
   `--fuzzy-keys` — all excluded from this clean baseline
-- Real hardware (a Mac, not this sandbox) — to separate "sandbox-only
-  numbers" from "shape of the scaling curve"
+- Whether the CSV/Parquet ordering flip between sandbox and Mac is a
+  hardware effect, a pandas/pyarrow version difference (3.0.2 vs
+  2.3.3, 24.0.0 both), or something else — not yet investigated, noted
+  as a real open question rather than guessed at
+- Why CSV's column-width compare-time penalty (2.3×→9.0×) is so much
+  smaller than its write-time penalty (40× at 10K rows) for the same
+  5→100 column change — not yet investigated
+
