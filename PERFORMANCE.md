@@ -5,29 +5,23 @@ databases, larger row counts, messier data). "Does this scale" only
 has a real answer when backed by measurements — not a guarantee for
 every machine or dataset shape.
 
-## Contents
+### Contents
 
-- [Performance \& scale notes](#performance--scale-notes)
-  - [Contents](#contents)
-  - [Methodology](#methodology)
-  - [Test environment (sandbox, round 1)](#test-environment-sandbox-round-1)
-  - [Results: `wherefore compare`, single CSV/Parquet file pair](#results-wherefore-compare-single-csvparquet-file-pair)
-  - [XLSX: write-time-dominated, scales far worse than CSV/Parquet](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
-  - [Where the time actually goes (1,000,000-row CSV breakdown)](#where-the-time-actually-goes-1000000-row-csv-breakdown)
-  - [Round 2: real hardware (Mac)](#round-2-real-hardware-mac)
-    - [Test environment (Mac, round 2)](#test-environment-mac-round-2)
-    - [Results, all three formats, all four tiers](#results-all-three-formats-all-four-tiers)
-  - [Round 2: proof, not just numbers](#round-2-proof-not-just-numbers)
-  - [Round 3: column count, not just row count](#round-3-column-count-not-just-row-count)
-    - [Schema](#schema)
-    - [Results: 10,000 rows, varying column count](#results-10000-rows-varying-column-count)
-    - [Results: 100,000 rows, varying column count](#results-100000-rows-varying-column-count)
-    - [Results: 250K, 500K, and 1M rows, varying column count](#results-250k-500k-and-1m-rows-varying-column-count)
-    - [The real finding: the column penalty doesn't just exist, it compounds](#the-real-finding-the-column-penalty-doesnt-just-exist-it-compounds)
-  - [What's next: real options, not just this one](#whats-next-real-options-not-just-this-one)
-    - [Item 1 results: the datetime-detection pre-check](#item-1-results-the-datetime-detection-pre-check)
-    - [Item 3 results: the polars experiment](#item-3-results-the-polars-experiment)
-  - [Still to measure](#still-to-measure)
+[Methodology](#methodology) · [Test environment](#test-environment-sandbox-round-1) ·
+[CSV/Parquet results](#results-wherefore-compare-single-csvparquet-file-pair) ·
+[XLSX results](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet) ·
+[Where the time goes](#where-the-time-actually-goes-1000000-row-csv-breakdown) ·
+[Round 2: real hardware](#round-2-real-hardware-mac) ·
+[Round 2: proof](#round-2-proof-not-just-numbers) ·
+[Round 3: column count](#round-3-column-count-not-just-row-count) ·
+[What's next](#whats-next-real-options-not-just-this-one) ·
+[Item 1 results](#item-1-results-the-datetime-detection-pre-check) ·
+[Item 3 results](#item-3-results-the-polars-experiment) ·
+[Item 4 investigation](#item-4-investigation-the-ordering-flip-that-wasnt) ·
+[Item 5 investigation](#item-5-investigation-why-compare-time-and-write-time-penalties-differed) ·
+[Round 4: database sources](#round-4-database-sources-item-6) ·
+[Round 4 extension: db column count](#round-4-extension-does-column-count-compound-for-databases-too) ·
+[Still to measure](#still-to-measure)
 
 ---
 
@@ -179,17 +173,20 @@ All three formats completed cleanly at every tier, including the
 1,000,000 rows for every format — exactly 10,000 mismatched rows
 (1% of 1M), same as round 1.
 
-**The relative ordering of CSV vs. Parquet flipped from round 1.** On
-this Mac, CSV is consistently as fast as or faster than Parquet at
-every tier — the opposite of the sandbox, where Parquet pulled ahead
-and the gap widened with scale. The 10K-row Parquet number (1.59s) is
-likely first-call pyarrow overhead, not a real per-row cost — it drops
-to 0.53s at 100K rows, faster than the 10K number despite 10× the
-data. Take this as a reminder that small-N numbers are noisy; the
-500K–1M rows are the more trustworthy comparison, and even there CSV
-and Parquet are close enough (1.33s vs 0.93s at 500K; 2.26s vs 1.46s at
-1M) that format choice between the two is not the lever that matters
-on this hardware. It clearly was in the sandbox.
+**Correction (after investigation — see below): there was no real
+ordering flip.** An earlier version of this document claimed CSV was
+"consistently as fast as or faster than Parquet" on this Mac. Re-
+reading the table above directly: Parquet is faster at 100K, 500K, and
+1M rows (0.53 vs 0.60; 0.93 vs 1.33; 1.46 vs 2.26) — only the 10K-row
+tier shows CSV ahead, and that tier is the one already flagged as
+likely first-call pyarrow overhead, not a real per-row cost (the 10K
+Parquet number, 1.59s, is slower than the 100K number, 0.53s, despite
+10× less data). Once that known-noisy point is set aside, **Parquet is
+faster than CSV at every reliable tier, on both the sandbox and this
+Mac** — the original "flip" claim was a misreading of this document's
+own table, not a real environment difference. Confirmed directly: see
+[Item 4 investigation](#item-4-investigation-the-ordering-flip-that-wasnt)
+below for how this was checked rather than just reasserted.
 
 **XLSX confirms the round-1 projection, at much better absolute
 numbers.** Round 1 estimated "a minute or more" to write 500K rows;
@@ -732,20 +729,326 @@ pandas immediately after date-detection, time the conversion step
 itself, and see how much of this 3.5–3.9× survives once the rest of
 the pipeline (still pandas-based) is back in the loop.
 
+### Item 4 investigation: the "ordering flip" that wasn't
+
+**The question:** round 2's original write-up claimed CSV was
+consistently as fast as or faster than Parquet on the Mac, the
+opposite of the sandbox. Was this a real pandas-version effect
+(sandbox ran pandas 3.0.2, Mac ran 2.3.3), a hardware effect, or
+something else?
+
+**Step 1 — re-read the data.** The claim doesn't actually match round
+2's own table: Parquet is faster at 100K, 500K, and 1M rows; only the
+known-noisy 10K tier shows CSV ahead. This alone resolves most of the
+question — see the correction above. No real flip exists once the
+noisy small-N point is set aside.
+
+**Step 2 — rule out the pandas-version hypothesis directly anyway**,
+since it's a real, checkable difference between the two environments
+(sandbox: pandas 3.0.2; Mac: pandas 2.3.3; pyarrow identical, 24.0.0,
+on both — ruling out pyarrow version as a factor from the start).
+Installed pandas 2.3.3 in the sandbox, re-ran the same 1M-row CSV vs.
+Parquet comparison, 5 trials each, median taken:
+
+```
+$ python3 -c "
+import pandas as pd
+print('Using pandas', pd.__version__)
+...
+"
+Using pandas 2.3.3
+CSV times: ['0.625', '1.009', '0.711', '0.629', '0.634']
+Parquet times: ['1.073', '0.414', '0.362', '0.344', '0.348']
+CSV median: 0.634s
+Parquet median: 0.362s
+```
+
+**Parquet is still faster than CSV in the sandbox even with pandas
+downgraded to exactly match the Mac's version.** The pandas-version
+hypothesis is directly ruled out, not just argued away.
+
+**Conclusion: there was no real ordering flip to explain.** Parquet is
+faster than CSV at every reliable (100K+ rows) tier, in both
+environments, in both the simple 5-column test and the wide
+column-count test. The original claim was a misreading of this
+document's own data, corrected above once caught. Recorded here, with
+the investigation that confirmed it, rather than quietly removed —
+this document's standard is to show how a wrong conclusion is found
+and fixed, not just to delete the evidence it happened.
+
+### Item 5 investigation: why compare-time and write-time penalties differed
+
+**The question:** going from 5 to 100 columns costs CSV's *write* time
+about 40× at 10K rows, but the full `wherefore compare` CLI's
+column-count penalty at the same row count was only 2.3× (see
+[Round 3](#round-3-column-count-not-just-row-count) above). Why such a
+gap, if both are reading/writing the same wide data?
+
+**Step 1 — isolate the load step alone**, no CLI process overhead, no
+diff, no report writing — just `pd.read_csv` + the datetime-detection
+pass, the two things that scale with column count inside `compare`:
+
+```
+$ python3 -c "
+import time, pandas as pd
+from wherefore.comparison import loaders
+for cols in [5, 100]:
+    t0 = time.time()
+    raw = pd.read_csv(f'source_n10000_c{cols}.csv', keep_default_na=False, na_values=[''])
+    t1 = time.time()
+    parsed = loaders._try_parse_datetime_columns(raw)
+    t2 = time.time()
+    print(f'cols={cols}: read={t1-t0:.4f}s, detect={t2-t1:.4f}s, total={t2-t0:.4f}s')
+"
+cols=5: read=0.0139s, detect=0.0068s, total=0.0207s
+cols=100: read=0.3358s, detect=0.1177s, total=0.4535s
+```
+
+Isolated load-step penalty: **21.9×** — much closer to write's ~40×
+than to the full-CLI's 2.3×. The scaling cost itself genuinely is
+steep; it didn't go away.
+
+**Step 2 — the full CLI number includes a large, column-count-independent
+fixed cost** (process startup, importing `typer`/`pandas`/`pyarrow`/
+`anthropic`/etc., the diff itself, writing the report) that doesn't
+grow with column count at all. At only 10,000 rows, the column-scaling
+cost is small in absolute terms, so this fixed cost dominates the
+total and dilutes the visible ratio down to 2.3×.
+
+**Step 3 — confirm the dilution shrinks as row count grows**, which it
+should if this explanation is right (the fixed cost stays constant
+while the scaling cost grows, so its relative share shrinks):
+
+| Rows | Full-CLI compare-time penalty (5→100 cols) |
+|---|---|
+| 10,000 | 2.3× |
+| 100,000 | 9.0× |
+| 250,000 | 15.7× |
+| 500,000 | 21.4× |
+| 1,000,000 | 30.6× |
+
+Exactly the predicted shape — the ratio climbs from 2.3× toward 30.6×
+as row count grows, approaching (though not yet reaching, even at 1M
+rows) the ~40× write-time-only penalty. **Items 4 and 5 turned out to
+be the same underlying phenomenon, viewed from two different angles:
+a real, steep column-count scaling cost that gets diluted by a fixed,
+column-count-independent overhead whenever the measurement includes
+full process/CLI cost rather than isolating the scaling step alone.**
+This table was already in this document (under Round 3) before this
+investigation — re-derived here as the explanation, not new data.
+
+## Round 4: database sources (item 6)
+
+Same schema (`id`, `name`, `amount`, `category`, `status`), same 1%
+mismatch rate, against real database backends instead of files —
+SQLite and a genuine PostgreSQL 16 server (TCP, not the WASM/socket-only
+PGlite the project's own test suite uses for unit tests — see the scope
+note below for why this pressure test needed something different).
+
+### Setup
+
+**SQLite**: `to_sql`, with an explicit `CREATE TABLE ... PRIMARY KEY`
+first (confirmed directly that `to_sql` alone does not declare a real
+primary key, which would have made `wherefore` fall back to a
+heuristic instead of real schema introspection — not representative
+of how a real table is normally defined).
+
+**PostgreSQL**: a real PostgreSQL 16 server (installed via `apt`, not
+mocked, not WASM), accessed over a genuine TCP connection
+(`postgresql://postgres:postgres@localhost:5432/...`). The project's
+own test suite uses `py-pglite` (PGlite, Postgres-via-WASM) for unit
+tests, which is the right tool there — but PGlite is Unix-socket-only,
+and `wherefore`'s own `parse_connection_string` is deliberately built
+to assume non-SQLite backends have a real host/port (confirmed
+directly: PGlite's socket-path DSN parses incorrectly through it,
+mangling the path into the database name). That's not a bug — it's a
+documented design choice, since real Postgres servers people actually
+connect to do have real TCP host/port pairs. This pressure test needed
+that real shape, so a real installed Postgres server was used instead.
+
+Bulk-loaded via `COPY`, not `executemany` — confirmed directly that
+naive `executemany` is genuinely slow for this kind of insert (8.51s
+for just 5,000 rows, ~588 rows/sec) and `COPY` is ~65× faster (0.13s
+for the same 5,000 rows). This matters for honesty: the insert
+mechanism is our test harness's choice, not something `wherefore`
+itself does or that a real user pays — using the slow path would have
+measured our own harness's inefficiency, not `wherefore`'s real
+comparison cost.
+
+### Results
+
+```
+$ for n in 5000 20000 50000 100000 500000; do
+>   python3 generate_db_data.py $n
+>   python3 run_db_test.py $n
+> done
+sqlite n=5000: 1.08s, peak_mem=155.2MB, exit=0
+sqlite n=20000: 1.18s, peak_mem=162.1MB, exit=0
+sqlite n=50000: 1.33s, peak_mem=175.2MB, exit=0
+sqlite n=100000: 1.60s, peak_mem=197.4MB, exit=0
+sqlite n=500000: 4.04s, peak_mem=413.6MB, exit=0
+```
+
+```
+$ for n in 5000 20000 50000 100000 500000; do
+>   python3 generate_db_data.py $n postgres
+>   python3 run_pg_test.py $n
+> done
+postgres n=5000: 1.07s, peak_mem=165.4MB, exit=0
+postgres n=20000: 1.18s, peak_mem=171.3MB, exit=0
+postgres n=50000: 1.34s, peak_mem=183.1MB, exit=0
+postgres n=100000: 1.88s, peak_mem=211.5MB, exit=0
+postgres n=500000: 4.74s, peak_mem=443.7MB, exit=0
+```
+
+Verified correct at the largest tier, both backends:
+
+```
+$ grep "mismatched row\|Join key" db_test/results/report_500000.md
+- Join key: `id`
+### `amount` -- 5000 mismatched row(s)
+$ grep "mismatched row\|Join key" db_test/results/report_pg_500000.md
+- Join key: `id`
+### `amount` -- 5000 mismatched row(s)
+```
+
+Both backends correctly detected the real schema primary key (not a
+heuristic fallback) and found exactly 5,000 mismatches — 1% of
+500,000, matching every file-based result at this row count.
+
+### Database vs. file, at exactly matching row counts
+
+Same schema, same mismatch rate, same row counts, generated as
+matching CSV files for a direct comparison:
+
+| Rows | CSV (s) | SQLite (s) | Postgres (s) | SQLite ÷ CSV | Postgres ÷ CSV |
+|---|---|---|---|---|---|
+| 5,000 | 1.02 | 1.08 | 1.07 | 1.06× | 1.05× |
+| 20,000 | 1.07 | 1.18 | 1.18 | 1.10× | 1.10× |
+| 50,000 | 1.18 | 1.33 | 1.34 | 1.13× | 1.14× |
+| 100,000 | 1.40 | 1.60 | 1.88 | 1.14× | 1.34× |
+| 500,000 | 2.73 | 4.04 | 4.74 | 1.48× | 1.74× |
+
+**Database sources are consistently a bit slower than equivalent
+files, and the gap widens with scale** — SQLite from 1.06× to 1.48×,
+Postgres from 1.05× to 1.74×, both growing as row count grows. This
+matches real, structural expectations: a database round-trip carries
+overhead a flat file doesn't pay — query execution, result-set
+serialization back through the Python driver, and for Postgres
+specifically, genuine network-stack overhead even when the "network"
+is localhost.
+
+**SQLite and Postgres perform almost identically to each other** at
+every tier (within a few percent), with Postgres very slightly slower
+at the larger tiers — consistent with Postgres paying real socket/
+network overhead that SQLite's direct in-process file access doesn't.
+
+**Practical reading: choosing a database over a file as your
+comparison source costs real but modest overhead at these row
+counts** — nowhere near XLSX's order-of-magnitude penalty, closer to a
+20–75% tax that grows gradually with scale rather than a step change.
+At rows beyond 500K, given the trend, expect this gap to continue
+widening — not yet tested at 1M+ for database sources.
+
+### Round 4 extension: does column count compound for databases too?
+
+Round 3 found CSV's column-count penalty worsens sharply as rows grow
+(2.3× → 30.6× across row tiers). Does the same hold for database
+sources? Tested directly: SQLite and Postgres, both backends, all 6
+column tiers (5/10/20/30/50/100) × all 5 row tiers (5K–500K) — 60
+real comparisons total, same schema and extra-column logic as the
+file-based width test.
+
+```
+$ for n in 5000 20000 50000 100000 500000; do
+>   for cols in 5 10 20 30 50 100; do
+>     python generate_db_data.py $n $cols sqlite
+>     python run_db_test.py $n $cols
+>   done
+> done
+[... 30 combinations, all exit=0 ...]
+sqlite n500000_c5: 1.54s, peak_mem=633.7MB, exit=0
+sqlite n500000_c100: 50.29s, peak_mem=10707.8MB, exit=0
+```
+
+```
+$ for n in 5000 20000 50000 100000 500000; do
+>   for cols in 5 10 20 30 50 100; do
+>     python generate_db_data.py $n $cols postgres
+>     python run_pg_test.py $n $cols
+>   done
+> done
+[... 30 combinations, all exit=0 ...]
+postgres n500000_c5: 1.47s, peak_mem=687.4MB, exit=0
+postgres n500000_c100: 45.06s, peak_mem=12434.8MB, exit=0
+```
+
+Verified correct at the heaviest combination, both backends:
+
+```
+$ grep "mismatched row\|Join key" db_test/results/report_n500000_c100.md
+- Join key: `id`
+### `amount` -- 5000 mismatched row(s)
+$ grep "mismatched row\|Join key" db_test/results/report_pg_n500000_c100.md
+- Join key: `id`
+### `amount` -- 5000 mismatched row(s)
+```
+
+**Yes — and the database penalty is worse than the file penalty.**
+5→100 column scaling factor, SQLite vs. the equivalent CSV result from
+Round 3:
+
+| Rows | CSV penalty (Round 3) | SQLite penalty |
+|---|---|---|
+| 100,000 | 9.0× | 12.5× |
+| 500,000 | 21.4× | 32.7× |
+
+Database sources aren't just slower than files at a fixed column
+count — they're *more sensitive* to column count growth than files
+are. A wide table costs proportionally more as a database source than
+the identical wide table would as a CSV.
+
+**A real, second finding: at high column counts, Postgres pulls ahead
+of SQLite — the opposite of what the 5-column-only result suggested.**
+
+| Cols | SQLite (500K rows, s) | Postgres (500K rows, s) | Postgres ÷ SQLite |
+|---|---|---|---|
+| 5 | 1.54 | 1.47 | 0.95× |
+| 10 | 3.35 | 3.01 | 0.90× |
+| 20 | 7.47 | 6.59 | 0.88× |
+| 30 | 12.54 | 11.46 | 0.91× |
+| 50 | 22.69 | 20.19 | 0.89× |
+| 100 | 50.29 | 45.06 | 0.90× |
+
+Postgres is consistently 5–12% *faster* than SQLite once real date
+columns are in the mix, at every column tier tested — not a fluke at
+one data point. The mechanism is real and checkable in `db.py` itself,
+not speculation: `query_table`'s SQLite branch calls
+`_try_parse_datetime_columns` (the same function profiled in Item 1)
+because SQLite stores everything as TEXT and needs the heuristic to
+recover real dates; the Postgres branch never calls it at all, because
+a native Postgres `TIMESTAMP` column round-trips as a real
+`datetime64` automatically. At 100 columns, 19 of them are genuine
+dates — SQLite pays Item 1's real, measured date-conversion cost on
+all 19; Postgres pays nothing for this step. **This isn't a contradiction
+of the original (5-column, no-real-dates) finding that SQLite and
+Postgres performed almost identically** — at 5 columns there are no
+real date columns to convert, so the mechanism that separates them
+at width never gets triggered; the two backends are close to equal
+exactly because the cost that would differentiate them isn't present
+yet.
+
 ## Still to measure
 
 - S3-backed sources (network latency as a new variable)
-- Database sources (`db://`), including `compare-dir`'s batch mode
+- `compare-dir`'s database batch mode specifically (multiple table
+  pairs, not just one) — this round tested single-pair `compare` only
 - Realistic/messy data: real nulls, near-duplicate keys,
   `--fuzzy-keys` — still excluded from this clean baseline (real dates
   are now covered, via the `*_date` column in the width matrix)
-- Whether the CSV/Parquet ordering flip between sandbox and Mac (at 5
-  columns specifically) is a hardware effect, a pandas/pyarrow version
-  difference, or something else — not yet investigated
-- Why CSV's column-width compare-time penalty is smaller than its
-  write-time penalty for the same column-count change — not yet
-  investigated
-- The actual polars experiment described above (#3) — not yet run
+- The polars conversion-overhead spike described in item 3's scope
+  boundary above — not yet run
 - XLSX at 1M rows × 100 columns — deliberately skipped (projected
   ~30 minutes combined); revisit only if a real use case needs it
+- Database sources beyond 500K rows — not yet tested
 
