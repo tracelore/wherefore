@@ -5,27 +5,18 @@ databases, larger row counts, messier data). "Does this scale" only
 has a real answer when backed by measurements — not a guarantee for
 every machine or dataset shape.
 
-## Contents
+### Contents
 
-- [Performance \& scale notes](#performance--scale-notes)
-  - [Contents](#contents)
-  - [Methodology](#methodology)
-  - [Test environment (sandbox, round 1)](#test-environment-sandbox-round-1)
-  - [Results: `wherefore compare`, single CSV/Parquet file pair](#results-wherefore-compare-single-csvparquet-file-pair)
-  - [XLSX: write-time-dominated, scales far worse than CSV/Parquet](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
-  - [Where the time actually goes (1,000,000-row CSV breakdown)](#where-the-time-actually-goes-1000000-row-csv-breakdown)
-  - [Round 2: real hardware (Mac)](#round-2-real-hardware-mac)
-    - [Test environment (Mac, round 2)](#test-environment-mac-round-2)
-    - [Results, all three formats, all four tiers](#results-all-three-formats-all-four-tiers)
-  - [Round 2: proof, not just numbers](#round-2-proof-not-just-numbers)
-  - [Round 3: column count, not just row count](#round-3-column-count-not-just-row-count)
-    - [Schema](#schema)
-    - [Results: 10,000 rows, varying column count](#results-10000-rows-varying-column-count)
-    - [Results: 100,000 rows, varying column count](#results-100000-rows-varying-column-count)
-    - [Results: 250K, 500K, and 1M rows, varying column count](#results-250k-500k-and-1m-rows-varying-column-count)
-    - [The real finding: the column penalty doesn't just exist, it compounds](#the-real-finding-the-column-penalty-doesnt-just-exist-it-compounds)
-  - [What's next: real options, not just this one](#whats-next-real-options-not-just-this-one)
-  - [Still to measure](#still-to-measure)
+[Methodology](#methodology) · [Test environment](#test-environment-sandbox-round-1) ·
+[CSV/Parquet results](#results-wherefore-compare-single-csvparquet-file-pair) ·
+[XLSX results](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet) ·
+[Where the time goes](#where-the-time-actually-goes-1000000-row-csv-breakdown) ·
+[Round 2: real hardware](#round-2-real-hardware-mac) ·
+[Round 2: proof](#round-2-proof-not-just-numbers) ·
+[Round 3: column count](#round-3-column-count-not-just-row-count) ·
+[What's next](#whats-next-real-options-not-just-this-one) ·
+[Item 1 results](#item-1-results-the-datetime-detection-pre-check) ·
+[Still to measure](#still-to-measure)
 
 ---
 
@@ -497,20 +488,14 @@ would have suggested on its own.
 ## What's next: real options, not just this one
 
 Three real findings came out of this investigation, each with a
-different appropriate response. Listed here as options to evaluate,
-not yet committed to:
+different appropriate response.
 
-**1. The datetime-detection heuristic (`loaders._try_parse_datetime_columns`)
-is real, measured overhead, and it's the cheapest thing to fix.**
-Confirmed earlier in this document: it costs almost as much as the CSV
-parse it sits on top of, on every string column, every load — even
-columns that obviously aren't dates. A cheap pre-check (sample a
-handful of values per column; only attempt the full vectorized
-`pd.to_datetime` call if they look plausibly date-shaped) would not
-require touching the comparison engine, the clustering layer, or
-anything downstream. This is the highest-value, lowest-risk change
-available right now, precisely because it's isolated to one function
-with a narrow, well-understood job.
+**1. ✅ IMPLEMENTED — the datetime-detection heuristic
+(`loaders._try_parse_datetime_columns`) now pre-checks a random
+20-value sample before committing to the full-column call.** See
+[Item 1: results](#item-1-results-the-datetime-detection-pre-check)
+below for what actually changed once this was built and measured —
+including an honest, real limitation the fix does not solve.
 
 **2. Parallelization is a real option, but it has a real ceiling, and
 it doesn't fix the column-count compounding by itself.** `wherefore`
@@ -546,14 +531,91 @@ detection specifically, not necessarily the whole pipeline) through
 polars is worth the added complexity. Not yet attempted. This is a
 meaningfully smaller, lower-risk move than a Go/Rust rewrite, since
 polars is already a dependency and already speaks pandas-compatible
-DataFrames.
+DataFrames. **Now more clearly justified given item 1's actual
+results below**, which show real date columns are where the remaining
+cost concentrates — exactly the kind of workload polars is built to
+handle differently.
 
-**Recommended order, if/when this gets picked up:** fix #1 first
-(cheap, isolated, immediately reduces real cost on every comparison
-regardless of size). Measure again. Then decide whether #2 or #3 is
-worth pursuing based on where the remaining cost actually sits — not
-before, since fixing #1 will change the relative shape of every number
-in this document.
+### Item 1 results: the datetime-detection pre-check
+
+**The fix:** before calling `pd.to_datetime` on a full column,
+randomly sample 20 non-null values and run the cheap parse on the
+sample only. If all 20 fail, skip the column entirely — it's
+essentially certain (≈1-in-95-trillion false-skip risk at the existing
+20%-failure threshold, computed directly) not to be a date column.
+This only ever skips the expensive call early; it never changes the
+outcome for a column that proceeds past it. A random sample, not the
+first N rows, was a deliberate, tested choice: a real export can have
+sentinel/null values clustered at the start, and a first-N sample
+would wrongly conclude a genuine date column has zero parseable
+values — confirmed directly by constructing exactly that case and
+showing a first-N sample fails it while a random sample doesn't. A new
+regression test (`test_sentinel_nulls_clustered_at_the_start_still_parse_as_hybrid_column`)
+locks this in.
+
+**Isolated function cost, 1,000,000-row file, 5 columns (3 string,
+none of them dates) — the original test case this document already
+profiled:**
+
+```
+$ python3 -c "
+import time
+import pandas as pd
+from wherefore.comparison import loaders
+
+t0 = time.time()
+raw = pd.read_csv('data/source_1000000.csv', keep_default_na=False, na_values=[''])
+t1 = time.time()
+print(f'raw pd.read_csv: {t1-t0:.3f}s')
+
+parsed = loaders._try_parse_datetime_columns(raw)
+t2 = time.time()
+print(f'_try_parse_datetime_columns: {t2-t1:.3f}s')
+"
+raw pd.read_csv: 0.210s
+_try_parse_datetime_columns: 0.061s
+```
+
+Before this fix, the same function on the same file (see
+[Where the time actually goes](#where-the-time-actually-goes-1000000-row-csv-breakdown)
+above) cost roughly 1.1s per file — **this is a real, large, ~18×
+speedup when none of the string columns are actually dates.**
+End-to-end `wherefore compare` on this file: **8.34s → 5.57s**, a 33%
+total reduction (remaining time is process startup, the diff itself,
+and report generation — none of which this fix touches).
+
+**The honest limit: a 100-column table with real date columns doesn't
+see the same win, because the fix correctly does NOT skip real dates.**
+Isolated breakdown on the column-width test's widest tier (1,000,000
+rows, 100 columns, 60 of them string-typed):
+
+```
+$ python3 -c "
+... [same diagnostic, against width_test/data/source_n1000000_c100.csv]
+"
+Total string columns: 60
+Columns that pre-check SKIPPED (cheap path): 41
+Columns that proceeded to the FULL expensive call: 19
+Which ones proceeded: ['extra_0_date', 'extra_1_date', ... extra_18_date']
+```
+
+The 19 columns that still pay the full cost are exactly the 19
+genuinely-real-date columns in this schema (one per extra-column
+cycle) — the fix correctly identifies them as needing the real
+conversion, since skipping them would silently leave real dates as
+unconverted strings, breaking correctness for the sake of speed. That
+would be a worse bug than the one this fix solves. End-to-end on this
+combination: **67.36s → 57.05s**, a real but much smaller 15%
+reduction — verified correct at 10,000 mismatched rows, same as every
+prior run on this combination.
+
+**What this means, stated plainly:** this fix helps a lot on tables
+where most string columns genuinely aren't dates (the common case for
+ID/name/category/status-style columns) and helps much less on tables
+with many genuine date columns, because converting real dates is
+necessary, correct work this fix was never meant to eliminate. The
+remaining cost on date-heavy wide tables is a real candidate for item
+3 (the polars experiment) — not a sign this fix did the wrong thing.
 
 ## Still to measure
 
