@@ -5,26 +5,47 @@ databases, larger row counts, messier data). "Does this scale" only
 has a real answer when backed by measurements — not a guarantee for
 every machine or dataset shape.
 
-### Contents
+## Contents
 
-- [Methodology](#methodology)
-- [Test environment](#test-environment-sandbox-round-1)
-- [CSV/Parquet results](#results-wherefore-compare-single-csvparquet-file-pair)
-- [XLSX results](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
-- [Where the time goes](#where-the-time-actually-goes-1000000-row-csv-breakdown)
-- [Round 2: real hardware](#round-2-real-hardware-mac)
-- [Round 2: proof](#round-2-proof-not-just-numbers)
-- [Round 3: column count](#round-3-column-count-not-just-row-count)
-- [What's next](#whats-next-real-options-not-just-this-one)
-- [Item 1 results](#item-1-results-the-datetime-detection-pre-check)
-- [Item 3 results](#item-3-results-the-polars-experiment)
-- [Item 4 investigation](#item-4-investigation-the-ordering-flip-that-wasnt)
-- [Item 5 investigation](#item-5-investigation-why-compare-time-and-write-time-penalties-differed)
-- [Round 4: database sources](#round-4-database-sources-item-6)
-- [Round 4 extension: db column count](#round-4-extension-does-column-count-compound-for-databases-too)
-- [Round 5: S3 sources](#round-5-s3-sources-item-7)
-- [Round 6: compare-dir batch mode](#round-6-compare-dirs-database-batch-mode-item-1-of-the-follow-up-list)
-- [Still to measure](#still-to-measure)
+- [Performance \& scale notes](#performance--scale-notes)
+  - [Contents](#contents)
+  - [Methodology](#methodology)
+  - [Test environment (sandbox, round 1)](#test-environment-sandbox-round-1)
+  - [Results: `wherefore compare`, single CSV/Parquet file pair](#results-wherefore-compare-single-csvparquet-file-pair)
+  - [XLSX: write-time-dominated, scales far worse than CSV/Parquet](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
+  - [Where the time actually goes (1,000,000-row CSV breakdown)](#where-the-time-actually-goes-1000000-row-csv-breakdown)
+  - [Round 2: real hardware (Mac)](#round-2-real-hardware-mac)
+    - [Test environment (Mac, round 2)](#test-environment-mac-round-2)
+    - [Results, all three formats, all four tiers](#results-all-three-formats-all-four-tiers)
+  - [Round 2: proof, not just numbers](#round-2-proof-not-just-numbers)
+  - [Round 3: column count, not just row count](#round-3-column-count-not-just-row-count)
+    - [Schema](#schema)
+    - [Results: 10,000 rows, varying column count](#results-10000-rows-varying-column-count)
+    - [Results: 100,000 rows, varying column count](#results-100000-rows-varying-column-count)
+    - [Results: 250K, 500K, and 1M rows, varying column count](#results-250k-500k-and-1m-rows-varying-column-count)
+    - [The real finding: the column penalty doesn't just exist, it compounds](#the-real-finding-the-column-penalty-doesnt-just-exist-it-compounds)
+  - [What's next: real options, not just this one](#whats-next-real-options-not-just-this-one)
+    - [Item 1 results: the datetime-detection pre-check](#item-1-results-the-datetime-detection-pre-check)
+    - [Item 3 results: the polars experiment](#item-3-results-the-polars-experiment)
+    - [Item 4 investigation: the "ordering flip" that wasn't](#item-4-investigation-the-ordering-flip-that-wasnt)
+    - [Item 5 investigation: why compare-time and write-time penalties differed](#item-5-investigation-why-compare-time-and-write-time-penalties-differed)
+  - [Round 4: database sources (item 6)](#round-4-database-sources-item-6)
+    - [Setup](#setup)
+    - [Results](#results)
+    - [Database vs. file, at exactly matching row counts](#database-vs-file-at-exactly-matching-row-counts)
+    - [Round 4 extension: does column count compound for databases too?](#round-4-extension-does-column-count-compound-for-databases-too)
+  - [Round 5: S3 sources (item 7)](#round-5-s3-sources-item-7)
+    - [A real methodology constraint, found and worked around](#a-real-methodology-constraint-found-and-worked-around)
+    - [Results: full `compare`, S3 source (in-process)](#results-full-compare-s3-source-in-process)
+    - [Local file load vs. S3 (mocked) load, same data, same process](#local-file-load-vs-s3-mocked-load-same-data-same-process)
+  - [Round 6: compare-dir's database batch mode (item 1 of the follow-up list)](#round-6-compare-dirs-database-batch-mode-item-1-of-the-follow-up-list)
+    - [The 8 tables](#the-8-tables)
+    - [Results (Mac, real hardware)](#results-mac-real-hardware)
+  - [Round 7: realistic/messy data — `--fuzzy-keys` (item 2 of the follow-up list)](#round-7-realisticmessy-data----fuzzy-keys-item-2-of-the-follow-up-list)
+    - [Method: reusing the project's own real corruptor, not a reimplementation](#method-reusing-the-projects-own-real-corruptor-not-a-reimplementation)
+    - [Results: `--fuzzy-keys` resolution cost, by row count and fuzzy rate](#results---fuzzy-keys-resolution-cost-by-row-count-and-fuzzy-rate)
+    - [Detection-only cost: `key_format_similarity` without `--fuzzy-keys`](#detection-only-cost-key_format_similarity-without---fuzzy-keys)
+  - [Still to measure](#still-to-measure)
 
 ---
 
@@ -1239,15 +1260,164 @@ Postgres pulls ahead at high column counts — this batch includes a
 real 100-column, 250K-row table, exactly the regime where that effect
 showed up.
 
+## Round 7: realistic/messy data — `--fuzzy-keys` (item 2 of the follow-up list)
+
+Every round so far used clean, exact-matching keys. Real migrations
+have keys that drift in format between systems — the project's own
+documented example: `"EMP-1001"` becoming `"EMP1001"`. `--fuzzy-keys`
+exists to resolve exactly that. Untested for performance until now.
+
+### Method: reusing the project's own real corruptor, not a reimplementation
+
+Rather than inventing a fuzzy-key scenario, this round reuses
+`wherefore.synthetic.corruptors.key_mismatch` — the actual production
+corruptor the project's own eval harness uses — to reformat a
+controlled fraction of target-side keys (dash-stripped, e.g.
+`EMP-001000` → `EMP001000`). Schema otherwise unchanged from every
+other round: `id` (now dash-formatted, not plain int), `name`,
+`amount`, `category`, `status`, with the usual independent 1%
+value-mismatch rate on `amount` so there's always real diff work
+alongside the key-matching work.
+
+Two genuinely separate code paths are involved, tested at different
+depths deliberately:
+
+- **`--fuzzy-keys`'s own resolution** (`key_matching.py`, RapidFuzz-based)
+  — the user-facing, opt-in feature, and the real unknown: it does
+  active per-key search across a shrinking candidate pool, a cost
+  profile nothing else this session resembles.
+- **`key_format_similarity`** (`clustering/signatures.py`) — runs
+  automatically on already-unmatched rows regardless of `--fuzzy-keys`,
+  using a cheap normalization-equality check, not RapidFuzz scoring.
+  Tested lighter, since its real risk is correctness (the code's own
+  docstring already names a false-positive risk), not raw scale.
+
+### Results: `--fuzzy-keys` resolution cost, by row count and fuzzy rate
+
+```
+$ for rate in 1 10 20 50 70; do
+>   python generate_fuzzy_data.py 100000 0.$(printf "%02d" $rate)
+>   python run_fuzzy_test.py 100000 $rate
+> done
+fuzzy n=100000 rate=1%: 1.922s, peak_mem=248.4MB, exit=0
+fuzzy n=100000 rate=10%: 10.003s, peak_mem=256.1MB, exit=0
+fuzzy n=100000 rate=20%: 18.896s, peak_mem=249.9MB, exit=0
+fuzzy n=100000 rate=50%: 53.245s, peak_mem=244.8MB, exit=0
+fuzzy n=100000 rate=70%: 82.089s, peak_mem=251.2MB, exit=0
+```
+
+| Fuzzy rate | 10K rows, sandbox (s) | 10K rows, Mac (s) | 100K rows, sandbox (s) | 100K rows, Mac (s) |
+|---|---|---|---|---|
+| 1% | 0.90 | 0.47 | 3.39 | 1.92 |
+| 10% | 0.99 | 0.53 | 19.99 | 10.00 |
+| 20% | 1.15 | 0.60 | 47.18 | 18.90 |
+| 50% | 1.82 | 0.93 | 118.36 | 53.25 |
+| 70% | 2.29 | 1.26 | 185.56 | 82.09 |
+
+Verified correct at the most extreme combination tested, both
+machines:
+
+```
+$ grep "Matched rows\|mismatched row" report_n100000_fuzzy70_fuzzy.md
+- Matched rows: 100000
+### `amount` -- 1000 mismatched row(s)
+```
+
+All 100,000 rows resolved correctly even at a 70% fuzzy-key rate — a
+rate far beyond anything a real migration would likely produce (most
+real drift affects a small fraction of keys), included specifically
+to stress-test the algorithm's behavior at its limit, not because it's
+expected in practice.
+
+**This is the first real cost cliff found all session, and it is
+purely CPU-time, not memory.** Memory stayed flat (~245–256MB)
+across the entire fuzzy-rate range on both machines — confirming the
+cost is RapidFuzz doing real per-key string-distance computation, not
+data volume. At 100K rows and a 70% fuzzy rate, a single comparison
+takes over a minute even on real hardware (82s on the Mac, 186s in the
+constrained sandbox).
+
+**The scaling is worse than linear but better than the naive O(n²)
+worst case the algorithm's shape suggests.** Per-fuzzy-key cost (100K
+rows, sandbox) stabilizes around 0.002–0.0027s/key from 10% onward,
+with the 1% tier as a clear small-N outlier dominated by fixed
+process overhead, not the matching algorithm itself. A direct
+quadratic-cost model was tested and rejected — the ratio of observed
+time to the model's prediction varies by nearly two orders of
+magnitude across fuzzy rates, meaning the shrinking-candidate-pool
+design in `key_matching.py` does measurably better than the
+worst-case bound, without this document claiming a precise complexity
+class it hasn't rigorously derived.
+
+### Detection-only cost: `key_format_similarity` without `--fuzzy-keys`
+
+```
+$ wherefore compare source_n100000_fuzzy70.csv target_n100000_fuzzy70.csv --key id
+WITHOUT --fuzzy-keys: 2.107s, exit=0
+Compared 100000 source rows against 100000 target rows.
+Matched rows: 30000
+Rows only in source: 70000
+  matches 'dedup_failure' (confidence 0.99)
+  matches 'key_mismatch' (confidence 1.00)
+Rows only in target: 70000
+  matches 'dedup_failure' (confidence 0.99)
+  matches 'key_mismatch' (confidence 1.00)
+  amount: 294 mismatches, pattern unrecognized
+```
+
+| | Sandbox | Mac |
+|---|---|---|
+| With `--fuzzy-keys` (100K rows, 70% rate) | 185.56s | 82.09s |
+| Without `--fuzzy-keys` (same data) | 9.44s | 2.11s |
+| Ratio | ~20× | ~39× |
+
+`key_format_similarity`'s detection-only path is dramatically cheaper
+than `--fuzzy-keys`'s active resolution, on both machines — confirming
+the cost lives specifically in *searching* for a match, not in
+*checking* whether two already-known unmatched keys normalize the
+same way. The Mac's larger ratio (39× vs. sandbox's 20×) makes sense:
+the cheap, mostly-vectorizable detection path benefits more from
+faster hardware than the many-small-RapidFuzz-calls resolution path
+does.
+
+**A real, important correctness finding, not just a performance one:**
+without `--fuzzy-keys`, only 294 value-mismatches surface (1% of the
+30,000 rows that happened to match exactly), versus the full 1,000
+(1% of all 100,000) once `--fuzzy-keys` correctly resolves every
+reformatted key. **`--fuzzy-keys` isn't just cosmetic key cleanup — at
+a high mismatch rate, it's the difference between correctly
+attributing real value mismatches and having most of them invisible,
+masked as unmatched-row noise instead.** This is a stronger
+justification for the feature's real cost than report tidiness alone.
+
+**A genuine, found-not-assumed correctness nuance:** the same
+unmatched rows trigger both `dedup_failure` (confidence ~0.99) and
+`key_mismatch` (confidence 1.00) simultaneously. Plausible mechanism:
+a source-only row's full content (everything but the key) has an
+exact counterpart somewhere in the target-only set, since these are
+literally the same underlying record with a reformatted key —
+`duplicate_content_fraction`'s signature likely can't distinguish that
+from genuine duplication. Not yet root-caused further; flagged here as
+a real, observed interaction between two taxonomy patterns rather than
+glossed over.
+
+**Practical reading:** `--fuzzy-keys` is fast and correct at realistic
+drift rates (1–20% of keys reformatted) — well under a minute even at
+100K rows. It becomes genuinely expensive only at high fuzzy rates
+(50%+) that would be unusual for a real migration, where most key
+drift affects a small fraction of records, not the majority. Treat the
+50–70% numbers as a real, useful stress-test ceiling, not a typical
+case.
+
 ## Still to measure
 
 - **Real S3 with a real AWS account** — round 5 only covers
   `wherefore`'s own local processing cost via mocked AWS; actual
   network/latency cost against a real bucket is untested and likely
   the dominant real-world factor
-- Realistic/messy data: real nulls, near-duplicate keys,
-  `--fuzzy-keys` — still excluded from this clean baseline (real dates
-  are now covered, via the `*_date` column in the width matrix)
+- Realistic/messy data: real nulls (including sentinel-string null
+  coercion) and near-duplicate keys, specifically — `--fuzzy-keys`
+  itself is now covered in Round 7
 - The polars conversion-overhead spike described in item 3's scope
   boundary above — not yet run
 - XLSX at 1M rows × 100 columns — deliberately skipped (projected
