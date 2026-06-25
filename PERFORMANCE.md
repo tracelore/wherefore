@@ -5,47 +5,29 @@ databases, larger row counts, messier data). "Does this scale" only
 has a real answer when backed by measurements — not a guarantee for
 every machine or dataset shape.
 
-## Contents
+### Contents
 
-- [Performance \& scale notes](#performance--scale-notes)
-  - [Contents](#contents)
-  - [Methodology](#methodology)
-  - [Test environment (sandbox, round 1)](#test-environment-sandbox-round-1)
-  - [Results: `wherefore compare`, single CSV/Parquet file pair](#results-wherefore-compare-single-csvparquet-file-pair)
-  - [XLSX: write-time-dominated, scales far worse than CSV/Parquet](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
-  - [Where the time actually goes (1,000,000-row CSV breakdown)](#where-the-time-actually-goes-1000000-row-csv-breakdown)
-  - [Round 2: real hardware (Mac)](#round-2-real-hardware-mac)
-    - [Test environment (Mac, round 2)](#test-environment-mac-round-2)
-    - [Results, all three formats, all four tiers](#results-all-three-formats-all-four-tiers)
-  - [Round 2: proof, not just numbers](#round-2-proof-not-just-numbers)
-  - [Round 3: column count, not just row count](#round-3-column-count-not-just-row-count)
-    - [Schema](#schema)
-    - [Results: 10,000 rows, varying column count](#results-10000-rows-varying-column-count)
-    - [Results: 100,000 rows, varying column count](#results-100000-rows-varying-column-count)
-    - [Results: 250K, 500K, and 1M rows, varying column count](#results-250k-500k-and-1m-rows-varying-column-count)
-    - [The real finding: the column penalty doesn't just exist, it compounds](#the-real-finding-the-column-penalty-doesnt-just-exist-it-compounds)
-  - [What's next: real options, not just this one](#whats-next-real-options-not-just-this-one)
-    - [Item 1 results: the datetime-detection pre-check](#item-1-results-the-datetime-detection-pre-check)
-    - [Item 3 results: the polars experiment](#item-3-results-the-polars-experiment)
-    - [Item 4 investigation: the "ordering flip" that wasn't](#item-4-investigation-the-ordering-flip-that-wasnt)
-    - [Item 5 investigation: why compare-time and write-time penalties differed](#item-5-investigation-why-compare-time-and-write-time-penalties-differed)
-  - [Round 4: database sources (item 6)](#round-4-database-sources-item-6)
-    - [Setup](#setup)
-    - [Results](#results)
-    - [Database vs. file, at exactly matching row counts](#database-vs-file-at-exactly-matching-row-counts)
-    - [Round 4 extension: does column count compound for databases too?](#round-4-extension-does-column-count-compound-for-databases-too)
-  - [Round 5: S3 sources (item 7)](#round-5-s3-sources-item-7)
-    - [A real methodology constraint, found and worked around](#a-real-methodology-constraint-found-and-worked-around)
-    - [Results: full `compare`, S3 source (in-process)](#results-full-compare-s3-source-in-process)
-    - [Local file load vs. S3 (mocked) load, same data, same process](#local-file-load-vs-s3-mocked-load-same-data-same-process)
-  - [Round 6: compare-dir's database batch mode (item 1 of the follow-up list)](#round-6-compare-dirs-database-batch-mode-item-1-of-the-follow-up-list)
-    - [The 8 tables](#the-8-tables)
-    - [Results (Mac, real hardware)](#results-mac-real-hardware)
-  - [Round 7: realistic/messy data — `--fuzzy-keys` (item 2 of the follow-up list)](#round-7-realisticmessy-data----fuzzy-keys-item-2-of-the-follow-up-list)
-    - [Method: reusing the project's own real corruptor, not a reimplementation](#method-reusing-the-projects-own-real-corruptor-not-a-reimplementation)
-    - [Results: `--fuzzy-keys` resolution cost, by row count and fuzzy rate](#results---fuzzy-keys-resolution-cost-by-row-count-and-fuzzy-rate)
-    - [Detection-only cost: `key_format_similarity` without `--fuzzy-keys`](#detection-only-cost-key_format_similarity-without---fuzzy-keys)
-  - [Still to measure](#still-to-measure)
+- [Methodology](#methodology)
+- [Test environment](#test-environment-sandbox-round-1)
+- [CSV/Parquet results](#results-wherefore-compare-single-csvparquet-file-pair)
+- [XLSX results](#xlsx-write-time-dominated-scales-far-worse-than-csvparquet)
+- [Where the time goes](#where-the-time-actually-goes-1000000-row-csv-breakdown)
+- [Round 2: real hardware](#round-2-real-hardware-mac)
+- [Round 2: proof](#round-2-proof-not-just-numbers)
+- [Round 3: column count](#round-3-column-count-not-just-row-count)
+- [What's next](#whats-next-real-options-not-just-this-one)
+- [Item 1 results](#item-1-results-the-datetime-detection-pre-check)
+- [Item 3 results](#item-3-results-the-polars-experiment)
+- [Item 4 investigation](#item-4-investigation-the-ordering-flip-that-wasnt)
+- [Item 5 investigation](#item-5-investigation-why-compare-time-and-write-time-penalties-differed)
+- [Round 4: database sources](#round-4-database-sources-item-6)
+- [Round 4 extension: db column count](#round-4-extension-does-column-count-compound-for-databases-too)
+- [Round 5: S3 sources](#round-5-s3-sources-item-7)
+- [Round 6: compare-dir batch mode](#round-6-compare-dirs-database-batch-mode-item-1-of-the-follow-up-list)
+- [Round 7: fuzzy-keys](#round-7-realisticmessy-data--fuzzy-keys-item-2-of-the-follow-up-list)
+- [Round 8: nulls and near-duplicate keys](#round-8-realisticmessy-data--nulls-and-near-duplicate-keys-item-2-continued)
+- [Round 9: polars conversion spike](#round-9-the-polars-conversion-overhead-spike-item-3)
+- [Still to measure](#still-to-measure)
 
 ---
 
@@ -1409,17 +1391,322 @@ drift affects a small fraction of records, not the majority. Treat the
 50–70% numbers as a real, useful stress-test ceiling, not a typical
 case.
 
+## Round 8: realistic/messy data — nulls and near-duplicate keys (item 2, continued)
+
+Round 7 covered `--fuzzy-keys`'s own performance. This round closes
+the rest of item 2: real null/sentinel coercion, and the
+near-duplicate-key false-positive risk `key_format_similarity`'s own
+docstring names. Both reuse real, existing project corruptors —
+`null_type_coercion` and a custom collision generator built on the
+same `_normalize_key` logic the detection code uses — not
+reimplementations.
+
+### Null/sentinel coercion: fast, correct, and a real pattern overlap
+
+Using the project's own `null_type_coercion` corruptor: a nullable
+`notes` column (10% genuine null rate) where 60% of those nulls get
+coerced to the literal string `"NULL"` on the target side — the
+classic "target system wrote the word NULL instead of leaving the
+cell empty" migration bug.
+
+```
+$ wherefore compare source_n100000_null60.csv target_n100000_null60.csv
+2.010s
+Compared 100000 source rows against 100000 target rows.
+Matched rows: 100000
+  amount: 1000 mismatches, pattern unrecognized
+  notes: 6000 mismatches, matches 'enum_drift' (confidence 1.00)
+  notes: 6000 mismatches, matches 'null_type_coercion' (confidence 1.00)
+```
+
+Correct and fast at 100K rows — 2.01s, no performance concern.
+`null_type_coercion` fires correctly at confidence 1.00 on exactly the
+6,000 affected rows (60% of 10,000 genuine nulls), with real example
+rows (`nan` → `NULL`) in the output.
+
+**A second confirmed case of two taxonomy patterns legitimately
+co-firing on the same root cause** (the first was Round 7's
+`dedup_failure`/`key_mismatch` overlap on reformatted-key rows):
+`enum_drift` also matches at confidence 1.00 on the identical 6,000
+rows. This makes sense once examined — every affected row maps the
+same source value (`NaN`) to the same target value (`"NULL"`), which
+is exactly the uniform-substitution shape `enum_drift`'s
+`consistent_value_mapping` signature is built to detect. Not a bug;
+a real, reproducible pattern interaction worth knowing about when
+reading a report that shows both findings on the same column.
+
+### Near-duplicate keys: the documented risk isn't live, but a narrower real one is
+
+`key_format_similarity`'s own docstring cites a historical example —
+`"ACCT-100002"` vs `"ACCT-100022"` scoring ~91 under raw RapidFuzz,
+which is why the shipped code uses strict normalization-equality
+instead. **Checked directly: that example does NOT collide under the
+real, shipped `_normalize_key`** (`acct100002` ≠ `acct100022`) — the
+docstring documents why an earlier, rejected approach was abandoned,
+not a live risk in the code that shipped.
+
+```
+$ python3 -c "
+from wherefore.clustering.signatures import _normalize_key
+print(_normalize_key('ACCT-100002'), _normalize_key('ACCT-100022'))
+"
+acct100002 acct100022
+```
+
+**The real, narrower risk, found by checking the actual logic**:
+`_normalize_key` only strips separators and folds case, so the only
+way two genuinely different records can collide is if their keys
+differ *exclusively* in separator type/presence or letter case — e.g.
+`"EMP-900000"` and `"EMP_900000"` as two real, unrelated employees who
+happen to share digits under different separator conventions.
+
+Built and tested directly: a dataset where unrelated source-only and
+target-only rows are given colliding keys at a controlled rate.
+
+```
+$ python3 generate_collision_data.py 1000 100 1.0
+$ wherefore compare source_n1000_u100_coll100.csv target_n1000_u100_coll100.csv --key id
+Compared 1100 source rows against 1100 target rows.
+Matched rows: 1000
+Rows only in source (100)
+  matches 'key_mismatch' (confidence 1.00)
+```
+
+**Confirmed: the false positive is real, but only manifests when
+(nearly) the entire batch of unmatched rows collides.** A 50%
+collision rate produced confidence 0.50 — correctly suppressed by the
+default 0.9 threshold (`detect_row_presence_patterns`'s
+`confidence_threshold`). Only at a 100% collision rate did the finding
+surface. Verified directly that the flagged rows are genuinely
+unrelated, not a missed reformat:
+
+```
+$ python3 -c "
+import pandas as pd
+src = pd.read_csv('source_n1000_u100_coll100.csv', dtype={'id': str})
+tgt = pd.read_csv('target_n1000_u100_coll100.csv', dtype={'id': str})
+print(src[src['id']=='EMP-900000'].to_string())
+print(tgt[tgt['id']=='EMP_900000'].to_string())
+"
+id          name    amount category  status
+EMP-900000  removed_0  1294.42    alpha  active
+id          name             amount category  status
+EMP_900000  unrelated_NEW_0  8649.33     beta  active
+```
+
+Two completely different records — different name, amount, category —
+genuinely unrelated, sharing only a coincidental digit sequence under
+a different separator. The confidence-threshold default (0.9) does
+real, useful work limiting this risk in practice; it took a
+constructed, near-total collision rate to surface it at all.
+
+**A more serious version of the same risk exists in `--fuzzy-keys`
+itself, and it's not just a flag — it actively merges records:**
+
+```
+$ wherefore compare source_n1000_u100_coll100.csv target_n1000_u100_coll100.csv --key id --fuzzy-keys
+Compared 1100 source rows against 1100 target rows.
+Matched rows: 1050
+Rows only in source (50)
+  matches 'key_mismatch' (confidence 1.00)
+Rows only in target (50)
+  matches 'key_mismatch' (confidence 1.00)
+  matches 'enum_drift' (confidence 1.00)
+  name: 50 mismatches
+  amount: 60 mismatches
+  category: 39 mismatches
+  status: 20 mismatches, matches 'enum_drift' (confidence 1.00)
+```
+
+`--fuzzy-keys` actually matched 50 of the 100 deliberately-unrelated
+pairs as the same record (`Matched rows: 1050`, up from the 1000-row
+base case), then reported their natural, unrelated differences as
+fabricated value mismatches — including a false `enum_drift` match.
+This is a real, more consequential version of the same risk:
+`key_format_similarity`'s strict normalization-equality check can only
+ever *flag* a coincidence; `--fuzzy-keys`'s RapidFuzz score-based
+matching can *act* on one, merging two real, different records and
+manufacturing differences between them that don't actually exist. The
+remaining 50 pairs correctly stayed unmatched (likely caught by the
+ambiguity-gap check, since the alternating dash/underscore/case
+variants in this test plausibly score similarly against each other in
+the shrinking candidate pool) — a partial, not complete, safeguard.
+
+**Practical reading:** this is a correctness risk, not a performance
+one, and it's narrow — it requires keys that coincidentally differ
+*only* in separator/case, a real but specific naming-convention
+collision, not general "similar-looking IDs." Real-world risk is
+highest when a dataset mixes ID formats across genuinely different
+record types or eras (e.g. one legacy system using underscores,
+another using dashes, for unrelated entities) rather than within one
+consistent ID scheme.
+
+## Round 9: the polars conversion-overhead spike (item 3)
+
+Item 3's experiment (under "What's next") measured polars' load +
+date-detection speedup in isolation — 3.5–3.9× faster than pandas at
+identical work. It deliberately did not measure converting the result
+back to pandas, since the rest of the pipeline (`diff_engine.compare`,
+type-hinted to take real `pd.DataFrame` objects, built on
+`datacompy.PandasCompare`) genuinely requires pandas — confirmed
+directly in the code, not assumed. This round closes that scope
+boundary: does the speedup survive `.to_pandas()`?
+
+### Method and a real measurement lesson
+
+First attempt ran 5 trials in a loop within one process — this caused
+a real OOM kill at the 500K-row tier (confirmed directly, the same
+failure mode Round 3 already hit once before for the same reason:
+multiple full data copies accumulating without release between
+trials, on top of this combination's already-tight ~16-19GB real
+memory need). Fixed the same way Round 3 fixed it: each trial as a
+fully separate process. Fewer trials per tier as a result, but each
+one clean and trustworthy rather than risking a misleading number from
+memory pressure distorting the timing.
+
+### Results: 100,000 rows, 100 columns
+
+```
+$ python3 -c "
+import time
+import polars as pl
+raw_pl = pl.read_csv('source_n100000_c100.csv')
+[... pre-check, date conversion, then: ...]
+t0 = time.time()
+pandas_df = converted.to_pandas()
+print(f'to_pandas: {time.time()-t0:.3f}s')
+"
+trial 0: read=0.698 precheck=0.006 convert=0.149 to_pandas=2.421 total=3.275
+trial 1: read=2.563 precheck=0.005 convert=0.140 to_pandas=0.812 total=3.519
+trial 2: read=0.662 precheck=0.005 convert=0.141 to_pandas=0.613 total=1.422
+trial 3: read=0.664 precheck=0.005 convert=0.143 to_pandas=0.277 total=1.088
+trial 4: read=0.611 precheck=0.004 convert=0.144 to_pandas=0.348 total=1.108
+medians: read=0.664 precheck=0.005 convert=0.143 to_pandas=0.613 total=1.422
+```
+
+Matching pandas baseline, same 5-trial rigor:
+
+```
+$ python3 -c "
+import time, pandas as pd
+from wherefore.comparison import loaders
+[... 5 trials of read_csv + _try_parse_datetime_columns ...]
+"
+trial 0: total=4.796s
+trial 1: total=4.456s
+trial 2: total=4.429s
+trial 3: total=4.260s
+trial 4: total=4.295s
+median: 4.429s
+```
+
+**`to_pandas()` is genuinely, surprisingly volatile at this row count**
+— 0.277s to 2.421s across 5 trials, an ~9× spread, far more variable
+than any other step measured this session (the pandas baseline, by
+contrast, stayed within 4.26–4.80s, a narrow, stable range). This
+looks like a real characteristic of `to_pandas()` in this constrained
+sandbox — plausibly memory allocation/GC timing — not a general
+measurement-noise problem, since nothing else showed this much
+spread.
+
+| | Median | Worst observed |
+|---|---|---|
+| Polars, load+detect only (no conversion) | 0.81s | — |
+| Polars, load+detect+`to_pandas()` | 1.42s | 3.23s |
+| Pandas baseline | 4.43s | — |
+| **Speedup, polars without conversion** | **5.5×** | — |
+| **Speedup, polars with conversion** | **3.1×** | **1.4× (worst case)** |
+
+**Even in the worst observed `to_pandas()` trial, polars was still
+faster than pandas** — the conversion cost is real and substantial,
+shrinking the advantage from 5.5× to a median 3.1× and as little as
+1.4× in the single worst trial, but it does not erase the advantage
+entirely at this row count.
+
+### Results: 500,000 rows, 100 columns
+
+Separate-process trials, 3 each (the same 16-19GB real memory
+ceiling Round 3 already established for this combination meant
+fewer, not more, trials made sense here):
+
+```
+$ for i in 1 2 3; do python3 -c "[... full polars pipeline incl. to_pandas ...]"; done
+read=4.858 precheck=0.018 convert=0.774 to_pandas=2.071 total=7.721
+read=4.779 precheck=0.007 convert=0.803 to_pandas=1.937 total=7.525
+read=4.615 precheck=0.007 convert=0.782 to_pandas=1.838 total=7.242
+```
+
+```
+$ for i in 1 2 3; do python3 -c "[... pandas baseline ...]"; done
+total=24.688s
+total=24.974s
+total=24.921s
+```
+
+**At 500K rows, both `to_pandas()` and the overall comparison are far
+more stable than at 100K rows** — a tight 1.838–2.071s range for the
+conversion step, versus the 100K tier's 0.277–2.421s spread. This
+suggests the earlier volatility is at least partly a small-N
+measurement artifact (less stable timing when absolute times are
+small), not an inherent, scale-independent property of `to_pandas()`
+— stated as a real, re-checked finding, not the first guess.
+
+| | 500K rows |
+|---|---|
+| Polars, load+detect only | 5.59s |
+| Polars, load+detect+`to_pandas()` | 7.53s |
+| Pandas baseline | 24.92s |
+| Speedup without conversion | 4.5× |
+| Speedup with conversion | 3.3× |
+
+**The speedup holds up well at this larger, more realistic scale —
+3.3×, close to the smaller tier's median 3.1×, with much less
+variance.** The conversion cost (~1.8-2.1s) is real but proportionally
+smaller relative to the much larger pandas baseline it's being
+compared against.
+
+### Correctness: the converted DataFrame is structurally identical
+
+```
+$ python3 -c "
+import polars as pl
+from wherefore.comparison import loaders
+pandas_native = loaders.load_csv('source_n100000_c100.csv')
+[... equivalent polars-then-to_pandas path ...]
+print('Native dtype:', pandas_native['extra_0_date'].dtype)
+print('Via-polars dtype:', via_polars['extra_0_date'].dtype)
+print('Shapes match:', pandas_native.shape == via_polars.shape)
+"
+Native dtype: datetime64[us]
+Via-polars dtype: datetime64[us]
+Shapes match: True
+```
+
+Identical dtypes (including the real date columns correctly converted
+to `datetime64[us]` on both paths), identical shape, identical column
+order. The polars-then-`to_pandas()` result is structurally
+indistinguishable from `wherefore`'s native pandas loader's output —
+it would genuinely work as a drop-in replacement for the rest of the
+pipeline if this were ever adopted, not just superficially similar.
+
+### What this round actually settles
+
+Item 3's original scope boundary asked whether the polars speedup
+"survives once the rest of the pipeline (still pandas-based) is back
+in the loop." **Answer: yes, meaningfully, at both tested scales** —
+3.1–3.3× at the median, real but variable at small row counts,
+stabilizing at larger ones. This is evidence the premise is genuinely
+worth a real scoped engineering effort, same conclusion as the
+original experiment, now confirmed against the specific risk
+(conversion overhead) that experiment's scope boundary named — not a
+new conclusion, a real, checked one.
+
 ## Still to measure
 
 - **Real S3 with a real AWS account** — round 5 only covers
   `wherefore`'s own local processing cost via mocked AWS; actual
   network/latency cost against a real bucket is untested and likely
   the dominant real-world factor
-- Realistic/messy data: real nulls (including sentinel-string null
-  coercion) and near-duplicate keys, specifically — `--fuzzy-keys`
-  itself is now covered in Round 7
-- The polars conversion-overhead spike described in item 3's scope
-  boundary above — not yet run
 - XLSX at 1M rows × 100 columns — deliberately skipped (projected
   ~30 minutes combined); revisit only if a real use case needs it
 
